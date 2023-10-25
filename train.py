@@ -170,8 +170,8 @@ if init_from == "scratch":
     print("Initializing a new model from scratch")
     gptconf = ModelArgs(**model_args)
     model = Transformer(gptconf)
-elif init_from == "resume":
-    print(f"Resuming training from {out_dir}")
+else:
+    print(f"{init_from}ing training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, "ckpt.pt")
     checkpoint = torch.load(ckpt_path, map_location=device)
@@ -190,9 +190,12 @@ elif init_from == "resume":
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint["iter_num"]
-    best_val_loss = checkpoint["best_val_loss"]
+    if init_from == "resume":
+        model.load_state_dict(state_dict)
+        iter_num = checkpoint["iter_num"]
+        best_val_loss = checkpoint["best_val_loss"]
+    elif init_from == "finetune":
+        model.load_state_dict(state_dict, strict=False)
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
