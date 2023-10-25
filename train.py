@@ -22,7 +22,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
-import tqdm
+from tqdm import tqdm
 
 import torch
 from model import Transformer, ModelArgs
@@ -75,7 +75,7 @@ decay_lr = True  # whether to decay the learning rate
 warmup_iters = 1000  # how many steps to warm up for
 # system
 device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = "bfloat16"  # float32|bfloat16|float16
+dtype = "float32"  # float32|bfloat16|float16
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [
@@ -221,15 +221,16 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
-    out = {}
+    out = {"train": 0.0, "val": 0.0}
     model.eval()
-    for split in ["train", "val"]:
+    splits = ["val"] if eval_only else ["train", "val"]
+    for split in splits:
         batch_iter = iter_batches(split=split)
         losses = torch.zeros(eval_iters)  # keep on CPU
-        for k in range(eval_iters):
+        for k in tqdm(range(eval_iters)):
             X, Y = next(batch_iter)
             with ctx:
-                logits = model(X, Y)
+                _ = model(X, Y)
                 loss = raw_model.last_loss
             losses[k] = loss.item()
         out[split] = losses.mean()
