@@ -22,6 +22,11 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
+    memory_attention: bool = False
+    memseqlen: int = 128
+    do_wm: bool = False
+    do_memory_ffn: bool = False
+    memory_norm: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -163,6 +168,118 @@ class Attention(nn.Module):
         output = self.resid_dropout(output)
         return output
 
+class MemoryAttention(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        print('use memory attention')
+        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        assert args.n_heads % self.n_kv_heads == 0
+        model_parallel_size = 1
+        self.n_local_heads = args.n_heads // model_parallel_size
+        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.head_dim = args.dim // args.n_heads
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        self.attn_dropout = nn.Dropout(args.dropout)
+        self.resid_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
+        # memory
+        self.memseqlen = args.memseqlen
+        self.do_wm = args.do_wm
+        if self.do_wm:
+            print('use wm')
+            self.wm = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.memory_norm = args.memory_norm
+        if self.memory_norm:
+            print('use memory norm')
+            self.memory_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.do_memory_ffn = args.do_memory_ffn
+        if self.do_memory_ffn:
+            print('use memory ffn')
+            self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+            self.feed_forward = FeedForward(
+                dim=args.dim,
+                hidden_dim=args.hidden_dim,
+                multiple_of=args.multiple_of,
+                dropout=args.dropout,
+            )
+        self.dim = args.dim
+        origin_mem = torch.zeros([1, self.memseqlen, self.dim])
+        self.register_buffer("origin_mem", origin_mem)
+
+        # use flash attention or a manual implementation?
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
+            mask = torch.triu(mask, diagonal=1)
+            self.register_buffer("mask", mask)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+    ):
+        bsz, seqlen, _ = x.shape
+
+        outputs = []
+        om = self.origin_mem.expand(bsz, self.memseqlen, self.dim)
+        for idx in range(0, seqlen, self.memseqlen):
+            subx = x[:, idx:idx+self.memseqlen]
+            _, subseqlen, _ = subx.shape
+
+            # QKV
+            xq, xk, xv = self.wq(subx), self.wk(subx), self.wv(subx)
+            xq = xq.view(bsz, subseqlen, self.n_local_heads, self.head_dim)
+            xk = xk.view(bsz, subseqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, subseqlen, self.n_local_kv_heads, self.head_dim)
+
+            # Memory KV
+            if self.do_wm:
+                om = self.wm(om)
+            if self.do_memory_ffn:
+                om = om + self.feed_forward.forward(self.ffn_norm(om))
+            if self.memory_norm:
+                om = self.memory_norm(om)
+            mq, mk, mv = self.wqm(om), self.wkm(om), self.wvm(om)
+            mq = mk.view(bsz, self.memseqlen, self.n_local_kv_heads, self.head_dim)
+            mk = mk.view(bsz, self.memseqlen, self.n_local_kv_heads, self.head_dim)
+            mv = mv.view(bsz, self.memseqlen, self.n_local_kv_heads, self.head_dim)
+            xq = torch.concat([mq, xq], dim=1)
+            xk = torch.concat([mk, xk], dim=1)
+            xv = torch.concat([mv, xv], dim=1)
+
+            # RoPE relative positional embeddings
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cos[:self.memseqlen+subseqlen], freqs_sin[:self.memseqlen+subseqlen])
+
+            # grouped multiquery attention: expand out keys and values
+            xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+            # make heads into a batch dimension
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+
+            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+
+            # restore time as batch dimension and concat heads
+            om = output.transpose(1, 2).contiguous().view(bsz, self.memseqlen+subseqlen, self.dim)[:, self.memseqlen:]
+            outputs.append(om)
+
+        output = torch.concat(outputs, dim=1)
+        # final projection into the residual stream
+        output = self.wo(output)
+        output = self.resid_dropout(output)
+        return output
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
@@ -186,7 +303,10 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        if args.memory_attention:
+            self.attention = MemoryAttention(args)
+        else:
+            self.attention = Attention(args)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=args.hidden_dim,

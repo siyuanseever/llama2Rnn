@@ -22,6 +22,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
+import tqdm
 
 import torch
 from model import Transformer, ModelArgs
@@ -56,6 +57,11 @@ n_heads = 6
 n_kv_heads = 6
 multiple_of = 32
 dropout = 0.0
+memory_attention = False
+memseqlen = 128
+do_wm = False
+do_memory_ffn = False
+memory_norm = False
 # adamw optimizer
 gradient_accumulation_steps = 4  # used to simulate larger batch sizes
 learning_rate = 5e-4  # max learning rate
@@ -153,6 +159,11 @@ model_args = dict(
     multiple_of=multiple_of,
     max_seq_len=max_seq_len,
     dropout=dropout,
+    memory_attention=memory_attention,
+    memseqlen=memseqlen,
+    do_wm=do_wm,
+    do_memory_ffn=do_memory_ffn,
+    memory_norm=memory_norm,
 )  # start with model_args from command line
 if init_from == "scratch":
     # init a new model from scratch
@@ -245,8 +256,9 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-train_batch_iter = iter_batches(split="train")
-X, Y = next(train_batch_iter)  # fetch the very first batch
+if not eval_only:
+    train_batch_iter = iter_batches(split="train")
+    X, Y = next(train_batch_iter)  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -275,7 +287,7 @@ while True:
                 )
             except Exception as e:
                 print(f"logging to wandb failed: {e}")
-        if losses["val"] < best_val_loss or always_save_checkpoint:
+        if (losses["val"] < best_val_loss and not eval_only) or always_save_checkpoint:
             best_val_loss = losses["val"]
             if iter_num > 0:
                 checkpoint = {
@@ -289,7 +301,7 @@ while True:
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
                 model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
-    if iter_num == 0 and eval_only:
+    if eval_only:
         break
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
@@ -330,7 +342,7 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
         print(
-            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | mfu {running_mfu*100:.2f}%"
+            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | mfu {running_mfu*100:.2f}% | mem: {torch.cuda.max_memory_allocated()/1e9:.2f} GB"
         )
     iter_num += 1
     local_iter_num += 1
