@@ -22,7 +22,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
-    memory_attention: bool = False
+    attention_type: str = "attention"
     memseqlen: int = 128
     do_wm: bool = False
     do_memory_ffn: bool = False
@@ -280,6 +280,79 @@ class MemoryAttention(nn.Module):
         output = self.resid_dropout(output)
         return output
 
+class ChunkLSTM(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        print('use LSTM')
+        self.memseqlen = args.memseqlen
+        self.s_dim = args.dim // args.memseqlen
+        self.dim = args.dim
+
+        self.h = nn.Parameter(torch.zeros([1, args.memseqlen, args.dim]))
+        self.c = nn.Parameter(torch.zeros([1, args.memseqlen, args.dim]))
+        self.wii = nn.Linear(args.dim, self.dim, bias=False)
+        self.whi = nn.Linear(args.dim, self.dim, bias=False)
+        self.wif = nn.Linear(args.dim, self.dim, bias=False)
+        self.whf = nn.Linear(args.dim, self.dim, bias=False)
+        self.wig = nn.Linear(args.dim, self.dim, bias=False)
+        self.whg = nn.Linear(args.dim, self.dim, bias=False)
+        self.wio = nn.Linear(args.dim, self.dim, bias=False)
+        self.who = nn.Linear(args.dim, self.dim, bias=False)
+        self.wo  = nn.Linear(args.dim, args.dim, bias=False)
+
+        self.resid_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
+
+        self.reduce_type = "old"
+
+        if self.reduce_type == "old":
+            mask = torch.full((1, args.memseqlen, args.memseqlen), 1.0/args.memseqlen)
+            mask = torch.tril(mask, diagonal=0)
+            self.register_buffer("mask", mask)
+        elif self.reduce_type == "fix":
+            mask = torch.tril(torch.ones(1, args.memseqlen, args.memseqlen))
+            mask = mask / torch.sum(mask, -1, keepdim=True)
+            self.register_buffer("mask", mask)
+        else:
+            reduce = torch.tril(torch.ones(1, args.memseqlen, args.memseqlen))
+            reduce = reduce / torch.sum(reduce, -1, keepdim=True)
+            self.reduce = nn.Parameter(reduce)
+            mask = torch.tril(torch.ones(1, args.memseqlen, args.memseqlen))
+            self.register_buffer("mask", mask)
+        
+    def forward(
+        self,
+        seq_x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+    ):
+        bsz, seqlen, _ = seq_x.shape        
+        outputs = []
+        h = self.h.expand(bsz, self.memseqlen, self.dim)
+        c = self.c.expand(bsz, self.memseqlen, self.dim)
+        for idx in range(0, seqlen, self.memseqlen):
+            x = seq_x[:, idx:idx+self.memseqlen]
+
+            i = F.sigmoid(self.wii(x) + self.whi(h))
+            f = F.sigmoid(self.wif(x) + self.whf(h))
+
+            g = self.wig(x) + self.whg(h)
+            if self.reduce_type == "train":
+                g = torch.matmul(self.reduce * self.mask, g) # with local chunk fuse
+            else:
+                g = torch.matmul(self.mask, g) # with local chunk fuse
+            g = F.tanh(g)
+
+            o = F.sigmoid(self.wio(x) + self.who(h))
+            c = f * c + i * g
+            h = o * F.tanh(c)
+    
+            outputs.append(h)
+
+        output = torch.concat(outputs, dim=1)
+        output = self.wo(output)
+        output = self.resid_dropout(output)
+        return output
 
 class FeedForward(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
@@ -303,8 +376,10 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        if args.memory_attention:
+        if args.attention_type == "memory_attention":
             self.attention = MemoryAttention(args)
+        elif args.attention_type == "LSTM":
+            self.attention = ChunkLSTM(args)
         else:
             self.attention = Attention(args)
         self.feed_forward = FeedForward(
@@ -352,7 +427,7 @@ class Transformer(nn.Module):
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
-            if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
+            if pn.endswith('w3.weight') or pn.endswith('wo.weight') or pn.endswith('wm.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
@@ -366,7 +441,7 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None, eval_last: bool = False) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
@@ -379,8 +454,13 @@ class Transformer(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.output(h)
-            self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if eval_last:
+                logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+                self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), (targets[:, [-1]]).view(-1), ignore_index=-1)
+                
+            else:
+                logits = self.output(h)
+                self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim

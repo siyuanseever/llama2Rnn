@@ -39,6 +39,7 @@ eval_interval = 2000
 log_interval = 1
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
+eval_last = False
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 init_from = "scratch"  # 'scratch' or 'resume'
 # wandb logging
@@ -57,7 +58,7 @@ n_heads = 6
 n_kv_heads = 6
 multiple_of = 32
 dropout = 0.0
-memory_attention = False
+attention_type = "attention"
 memseqlen = 128
 do_wm = False
 do_memory_ffn = False
@@ -159,7 +160,7 @@ model_args = dict(
     multiple_of=multiple_of,
     max_seq_len=max_seq_len,
     dropout=dropout,
-    memory_attention=memory_attention,
+    attention_type=attention_type,
     memseqlen=memseqlen,
     do_wm=do_wm,
     do_memory_ffn=do_memory_ffn,
@@ -233,7 +234,7 @@ def estimate_loss():
         for k in tqdm(range(eval_iters)):
             X, Y = next(batch_iter)
             with ctx:
-                _ = model(X, Y)
+                _ = model(X, Y, eval_last=eval_last)
                 loss = raw_model.last_loss
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -276,7 +277,7 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             try:
                 wandb.log(
@@ -304,7 +305,8 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
-                model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
+                if attention_type == "attention":
+                    model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
     if eval_only:
         break
 
