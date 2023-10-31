@@ -3,25 +3,27 @@
 
 from datetime import datetime
 
-# I/O
-out_dir = "out/custom_4096"
 # data
-batch_size = 32 // 2  # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
 vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+# vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 4096 # the Llama 2 tokenizer has 32K tokens
 
-max_seq_len = 1024
-
-init_from = "resume"
+max_seq_len = 256
+init_from = "scratch"
+# memory
 attention_type = "memory_attention"
-memseqlen = 256 // 2
+memseqlen = 64 // 2
 do_wm = False
 do_memory_ffn = True
 memory_norm = True
+reuse_kv = False
+train_orimem = True
 # adamw optimizer
-gradient_accumulation_steps = 4 * 4 * 2  # used to simulate larger batch sizes
+gradient_accumulation_steps = 4 * 4  # used to simulate larger batch sizes
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
+test_model = False
 # I/O
 exp_name = f"{vocab_source}{vocab_size}_len{max_seq_len}"
 if attention_type == "memory_attention":
@@ -32,6 +34,10 @@ if attention_type == "memory_attention":
         exp_name += '_ffn'
     if memory_norm:
         exp_name += '_norm'
+    if reuse_kv:
+        exp_name += '_reusekv'
+    if train_orimem:
+        exp_name += '_trainmem'
 
 out_dir = f"out/{exp_name}"
 # wandb logging

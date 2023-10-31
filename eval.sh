@@ -9,22 +9,22 @@ eval_only=True
 init_from="resume"
 always_save_checkpoint=False
 
-# batch_size=1  # if gradient_accumulation_steps > 1, this is the micro-batch size
-# eval_iters=100
-# eval_last=False
+batch_size=1  # if gradient_accumulation_steps > 1, this is the micro-batch size
+eval_iters=100
+eval_last=False
 batch_size=32  # if gradient_accumulation_steps > 1, this is the micro-batch size
 eval_iters=1000
 eval_last=True
 
 # model
 # attention_type="attention"
-attention_type="memory_attention"
+attention_type="LSTM"
 memseqlen=32
 do_wm=False
 do_memory_ffn=True
 memory_norm=True
 # I/O
-out_dir=./out/custom4096_len256_memory32_ffn_norm_finetune
+out_dir=./out/custom4096_len256_LSTM32_trainreduce
 
 mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh

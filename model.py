@@ -23,10 +23,13 @@ class ModelArgs:
     max_seq_len: int = 2048
     dropout: float = 0.0
     attention_type: str = "attention"
+    memory_attention: bool = False
     memseqlen: int = 128
     do_wm: bool = False
     do_memory_ffn: bool = False
     memory_norm: bool = False
+    train_orimem: bool = False
+    reuse_kv: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -183,9 +186,6 @@ class MemoryAttention(nn.Module):
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
-        self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
-        self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
-        self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
@@ -209,9 +209,20 @@ class MemoryAttention(nn.Module):
                 multiple_of=args.multiple_of,
                 dropout=args.dropout,
             )
+        self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+        if args.reuse_kv:
+            print('resue kv')
+            self.wkm.weight = self.wk.weight
+            self.wvm.weight = self.wv.weight
         self.dim = args.dim
         origin_mem = torch.zeros([1, self.memseqlen, self.dim])
-        self.register_buffer("origin_mem", origin_mem)
+        if args.train_orimem:
+            print('train original memory')
+            self.origin_mem = nn.Parameter(origin_mem)
+        else:
+            self.register_buffer("origin_mem", origin_mem)
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -303,7 +314,8 @@ class ChunkLSTM(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
-        self.reduce_type = "old"
+        self.reduce_type = "train"
+        assert self.reduce_type in ["old", "mask", "train"]
 
         if self.reduce_type == "old":
             mask = torch.full((1, args.memseqlen, args.memseqlen), 1.0/args.memseqlen)
@@ -376,7 +388,7 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        if args.attention_type == "memory_attention":
+        if args.attention_type == "memory_attention" or args.memory_attention:
             self.attention = MemoryAttention(args)
         elif args.attention_type == "LSTM":
             self.attention = ChunkLSTM(args)

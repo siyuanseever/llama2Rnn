@@ -58,11 +58,14 @@ n_heads = 6
 n_kv_heads = 6
 multiple_of = 32
 dropout = 0.0
+# memory
 attention_type = "attention"
 memseqlen = 128
 do_wm = False
 do_memory_ffn = False
 memory_norm = False
+train_orimem = False
+reuse_kv = False
 # adamw optimizer
 gradient_accumulation_steps = 4  # used to simulate larger batch sizes
 learning_rate = 5e-4  # max learning rate
@@ -78,6 +81,8 @@ warmup_iters = 1000  # how many steps to warm up for
 device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = "float32"  # float32|bfloat16|float16
 compile = True  # use PyTorch 2.0 to compile the model to be faster
+# test_model
+test_model = False
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -165,6 +170,8 @@ model_args = dict(
     do_wm=do_wm,
     do_memory_ffn=do_memory_ffn,
     memory_norm=memory_norm,
+    train_orimem=train_orimem,
+    reuse_kv=reuse_kv,
 )  # start with model_args from command line
 if init_from == "scratch":
     # init a new model from scratch
@@ -197,7 +204,29 @@ else:
         best_val_loss = checkpoint["best_val_loss"]
     elif init_from == "finetune":
         model.load_state_dict(state_dict, strict=False)
+    elif "freeze" in init_from:
+        model.load_state_dict(state_dict, strict=False)
+        ft_params = [
+            "attention.wm",
+            "attention.ffn_norm", "attention.feed_forward",
+            "attention.memory_norm", 
+            "attention.wqm", "attention.wkm", "attention.wvm", 
+        ]
+        if "feed_forward" in init_from:
+            ft_params.extend(["attention."]) 
+        print("finetune params:")
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+            for np in ft_params:
+                if np in name:
+                    param.requires_grad = True
+                    print(name, param.size(), param.requires_grad)
+                    break
+    else:
+        assert False, init_from
 model.to(device)
+if test_model:
+    exit()
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))

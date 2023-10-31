@@ -4,22 +4,22 @@
 from datetime import datetime
 
 # I/O
-init_from = "finetune"
+init_from = "freeze_ft_attention" # finetune or freeze
 out_dir = "out/custom_4096"
 # data
-batch_size = 32 // 2  # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
 vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 4096 # the Llama 2 tokenizer has 32K tokens
 
-max_seq_len = 1024
+max_seq_len = 256
 
 attention_type = "memory_attention"
-memseqlen = 256 // 2
+memseqlen = 64 // 2
 do_wm = False
 do_memory_ffn = True
 memory_norm = True
 # adamw optimizer
-gradient_accumulation_steps = 4 * 4 * 2  # used to simulate larger batch sizes
+gradient_accumulation_steps = 4 * 4  # used to simulate larger batch sizes
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 # I/O
