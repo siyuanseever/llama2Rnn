@@ -212,21 +212,20 @@ else:
             "attention.memory_norm", 
             "attention.wqm", "attention.wkm", "attention.wvm", 
         ]
-        if "feed_forward" in init_from:
-            ft_params.extend(["attention."]) 
-        print("finetune params:")
+        if "attention" in init_from:
+            ft_params.extend(["attention"]) 
         for name, param in model.named_parameters():
             param.requires_grad = False
             for np in ft_params:
                 if np in name:
                     param.requires_grad = True
-                    print(name, param.size(), param.requires_grad)
-                    break
     else:
         assert False, init_from
-model.to(device)
+for name, param in model.named_parameters():
+    print(name, param.size(), param.requires_grad)
 if test_model:
-    exit()
+    exit(0)
+model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
@@ -323,19 +322,18 @@ while True:
                 print(f"logging to wandb failed: {e}")
         if (losses["val"] < best_val_loss and not eval_only) or always_save_checkpoint:
             best_val_loss = losses["val"]
-            if iter_num > 0:
-                checkpoint = {
-                    "model": raw_model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "model_args": model_args,
-                    "iter_num": iter_num,
-                    "best_val_loss": best_val_loss,
-                    "config": config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
-                if attention_type == "attention":
-                    model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
+            checkpoint = {
+                "model": raw_model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "model_args": model_args,
+                "iter_num": iter_num,
+                "best_val_loss": best_val_loss,
+                "config": config,
+            }
+            print(f"saving checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
+            if attention_type == "attention":
+                model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
     if eval_only:
         break
 

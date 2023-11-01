@@ -13,6 +13,7 @@ run: run.c
 rundebug: run.c
 	$(CC) -g -o run run.c -lm
 	$(CC) -g -o runq runq.c -lm
+	$(CC) -g -o runqm runqm.c -lm
 
 # https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
 # https://simonbyrne.github.io/notes/fastmath/
@@ -27,6 +28,7 @@ rundebug: run.c
 runfast: run.c
 	$(CC) -Ofast -o run run.c -lm
 	$(CC) -Ofast -o runq runq.c -lm
+	$(CC) -Ofast -o runqm runqm.c -lm
 
 # additionally compiles with OpenMP, allowing multithreaded runs
 # make sure to also enable multiple threads when running, e.g.:
@@ -35,6 +37,7 @@ runfast: run.c
 runomp: run.c
 	$(CC) -Ofast -fopenmp -march=native run.c  -lm  -o run
 	$(CC) -Ofast -fopenmp -march=native runq.c  -lm  -o runq
+	$(CC) -Ofast -fopenmp -march=native runqm.c  -lm  -o runqm
 
 .PHONY: win64
 win64:

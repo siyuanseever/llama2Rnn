@@ -209,13 +209,13 @@ class MemoryAttention(nn.Module):
                 multiple_of=args.multiple_of,
                 dropout=args.dropout,
             )
-        self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
-        self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
-        self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
         if args.reuse_kv:
             print('resue kv')
-            self.wkm.weight = self.wk.weight
-            self.wvm.weight = self.wv.weight
+            self.wqm, self.wkm, self.wvm = self.wq, self.wk, self.wv
+        else:
+            self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+            self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
+            self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
         self.dim = args.dim
         origin_mem = torch.zeros([1, self.memseqlen, self.dim])
         if args.train_orimem:
