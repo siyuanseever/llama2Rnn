@@ -1,4 +1,4 @@
-/* Inference for Llama-2 Transformer model in pure C, int8 quantized forward pass. */
+/* Inference for Llama-2-Rnn Transformer model in pure C, int8 quantized forward pass. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -556,7 +556,6 @@ float* forward(Transformer* transformer, int token, int pos) {
         int mloff = l * p->mem_len * dim; // memory layer offset for convenience
         float* mem_row = s->mem_cache + mloff + mem_pos * dim;
         memcpy(mem_row, s->xb, dim * sizeof(*mem_row));
-        // TODO: update_memory_cache();
 
         // final matmul to get the output of the attention
         quantize(&s->xq, s->xb, dim);
@@ -970,7 +969,7 @@ long time_in_ms() {
 // ----------------------------------------------------------------------------
 // generation loop
 
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps) {
+void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, int update_mode) {
     Config* p = &transformer->config;
     char *empty_prompt = "";
     if (prompt == NULL) { prompt = empty_prompt; }
@@ -994,17 +993,21 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         chunk_pos = pos % p->mem_len;
             
         // update memory kv cache; 
-        // TODO: need update at every token
-        if (pos > 0 && chunk_pos == 0) {
-            for (int mem_pos = 0; mem_pos < p->mem_len; mem_pos++) {
-                for(int l = 0; l < p->n_layers; l++) {
-                    update_memory_cache(transformer, transformer->state.mem_cache, mem_pos, l);
-                }
-            }
-        }
+         if (update_mode == 0 && pos > 0 && chunk_pos == 0) {
+             for (int mem_pos = 0; mem_pos < p->mem_len; mem_pos++) {
+                 for(int l = 0; l < p->n_layers; l++) {
+                     update_memory_cache(transformer, transformer->state.mem_cache, mem_pos, l);
+                 }
+             }
+         }
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, chunk_pos);
+        if (update_mode == 1) {
+            for(int l = 0; l < p->n_layers; l++) {
+                update_memory_cache(transformer, transformer->state.mem_cache, chunk_pos, l);
+            }
+        }
 
         // advance the state state machine
         if (pos < num_prompt_tokens - 1) {
@@ -1059,7 +1062,7 @@ void read_stdin(const char* guide, char* buffer, size_t bufsize) {
 // is not safely implemented, it's more a proof of concept atm.
 
 void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
-          char *cli_user_prompt, char *cli_system_prompt, int steps) {
+          char *cli_user_prompt, char *cli_system_prompt, int steps, int update_mode) {
 
     Config* p = &transformer->config;
     // buffers for reading the system prompt and user prompt from stdin
@@ -1071,6 +1074,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
     int user_idx;
     int assistent_idx;
+    int eof = 1;
 
     // start the main loop
     int8_t user_turn = 1; // user starts
@@ -1078,8 +1082,9 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int token;       // stores the current token to feed into the transformer
     int prev_token;
     int pos = 0;     // position in the sequence
-    while (pos < steps) {
-        pos = pos % p->mem_len; // just use reccurent pos
+    int chunk_pos;  // max chunk_pos equal mem_len
+    while (chunk_pos < steps) {
+        chunk_pos = pos % p->mem_len;
 
         // when it is the user's turn to contribute tokens to the dialog...
         if (user_turn) {
@@ -1101,6 +1106,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             } else {
                 // otherwise get user prompt from stdin
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
+                // TODO: multi-thred to update_memory_cache when user are writting things
+                //
             }
             // render user/system prompts into the Llama 2 Chat schema
             if (pos == 0 && system_prompt[0] != '\0') {
@@ -1128,11 +1135,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             assistent_idx++;
         }
         // EOS (=2) token ends the Assistant turn
-        if (token == 1 && assistent_idx > 1) { user_turn = 1; } // because llama only can generate BOS (=1)
+        if (token == eof && assistent_idx > 1) { user_turn = 1; } // because llama only can generate BOS (=1)
 
         // update memory kv cache; 
-        // TODO: need update at every token
-        if (pos > 0) {
+        if (update_mode == 0 && pos > 0 && chunk_pos == 0) {
             for (int mem_pos = 0; mem_pos < p->mem_len; mem_pos++) {
                 for(int l = 0; l < p->n_layers; l++) {
                     update_memory_cache(transformer, transformer->state.mem_cache, mem_pos, l);
@@ -1141,17 +1147,22 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         }
 
         // forward the transformer to get logits for the next token
-        float* logits = forward(transformer, token, pos);
+        float* logits = forward(transformer, token, chunk_pos);
+        if (update_mode == 1) {
+            for(int l = 0; l < p->n_layers; l++) {
+                update_memory_cache(transformer, transformer->state.mem_cache, chunk_pos, l);
+            }
+        }
         next = sample(sampler, logits);
         pos++;
 
-        if (user_idx >= num_prompt_tokens && user_turn != 1) {
+        if (user_idx >= num_prompt_tokens && user_turn != 1 && next != eof) {
             // the Assistant is responding, so print its output
             char* piece = decode(tokenizer, token, next);
             safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
         }
-        if (next == 2) { printf("\n"); }
+        if (next == eof) { printf("\n"); }
     }
     printf("\n");
     free(prompt_tokens);
@@ -1169,6 +1180,7 @@ void error_usage() {
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
     fprintf(stderr, "  -s <int>    random seed, default time(NULL)\n");
+    fprintf(stderr, "  -u <string> update memory cache mode\n");
     fprintf(stderr, "  -n <int>    number of steps to run for, default 256. 0 = max_seq_len\n");
     fprintf(stderr, "  -i <string> input prompt\n");
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
@@ -1185,6 +1197,7 @@ int main(int argc, char *argv[]) {
     float temperature = 1.0f;   // 0.0 = greedy deterministic. 1.0 = original. don't set higher
     float topp = 0.9f;          // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
     int steps = 256;            // number of steps to run for
+    int update_mode = 0;       // the update memory cache mode 
     char *prompt = NULL;        // prompt string
     unsigned long long rng_seed = 0; // seed rng with time by default
     char *mode = "generate";    // generate|chat
@@ -1202,6 +1215,7 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
         else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
         else if (argv[i][1] == 'n') { steps = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'u') { update_mode = atoi(argv[i + 1]); }
         else if (argv[i][1] == 'i') { prompt = argv[i + 1]; }
         else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; }
         else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
@@ -1231,9 +1245,9 @@ int main(int argc, char *argv[]) {
 
     // run!
     if (strcmp(mode, "generate") == 0) {
-        generate(&transformer, &tokenizer, &sampler, prompt, steps);
+        generate(&transformer, &tokenizer, &sampler, prompt, steps, update_mode);
     } else if (strcmp(mode, "chat") == 0) {
-        chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, steps);
+        chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, steps, update_mode);
     } else {
         fprintf(stderr, "unknown mode: %s\n", mode);
         error_usage();
