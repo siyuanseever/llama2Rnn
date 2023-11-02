@@ -15,6 +15,8 @@
     #include <sys/mman.h>
 #endif
 // ----------------------------------------------------------------------------
+#define PROMPT_ZISE 65536
+#define RENDERED_SIZE (PROMPT_ZISE * 2) + 128
 // Globals
 int GS = 0; // group size global for quantization of the weights
 
@@ -966,6 +968,17 @@ long time_in_ms() {
     return time.tv_sec * 1000 + time.tv_nsec / 1000000;
 }
 
+void time_in_str(char* buffer, int size) {
+    time_t raw_time;
+    time(&raw_time);
+
+    // 转换为本地时间
+    struct tm *local_time = localtime(&raw_time);
+
+    // 格式化时间
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", local_time);
+}
+
 // ----------------------------------------------------------------------------
 // generation loop
 
@@ -988,7 +1001,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     int next;        // will store the next token in the sequence
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;     // position in the sequence
-    int chunk_pos;  // max chunk_pos equal mem_len
+    int chunk_pos = 0;  // max chunk_pos equal mem_len
     while (pos < steps) {
         chunk_pos = pos % p->mem_len;
             
@@ -1003,7 +1016,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, chunk_pos);
-        if (update_mode == 1) {
+        if (update_mode == 1) { // This mode is not thoroughly tested, as during training, memory updates occur every chunk
             for(int l = 0; l < p->n_layers; l++) {
                 update_memory_cache(transformer, transformer->state.mem_cache, chunk_pos, l);
             }
@@ -1067,14 +1080,19 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     Config* p = &transformer->config;
     // buffers for reading the system prompt and user prompt from stdin
     // you'll notice they are soomewhat haphazardly and unsafely set atm
-    char system_prompt[512];
-    char user_prompt[512];
-    char rendered_prompt[1152];
+    // char *system_prompt = (char *) malloc(PROMPT_ZISE * sizeof(char));
+    // char *user_prompt = (char *) malloc(PROMPT_ZISE * sizeof(char));
+    // char *rendered_prompt = (char *) malloc(rendered_PROMPT_ZISE * sizeof(char));
+    char system_prompt[PROMPT_ZISE];
+    char user_prompt[PROMPT_ZISE];
+    char rendered_prompt[RENDERED_SIZE];
     int num_prompt_tokens = 0;
-    int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
+    int* prompt_tokens = (int*)malloc(RENDERED_SIZE * sizeof(int));
     int user_idx;
-    int assistent_idx;
-    int eof = 1;
+    int assistent_idx = 0;
+    int eof = 2;
+    char time_str[80];
+    char user_str[100];
 
     // start the main loop
     int8_t user_turn = 1; // user starts
@@ -1082,7 +1100,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int token;       // stores the current token to feed into the transformer
     int prev_token;
     int pos = 0;     // position in the sequence
-    int chunk_pos;  // max chunk_pos equal mem_len
+    int chunk_pos = 0;  // max chunk_pos equal mem_len
     while (chunk_pos < steps) {
         chunk_pos = pos % p->mem_len;
 
@@ -1105,7 +1123,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 strcpy(user_prompt, cli_user_prompt);
             } else {
                 // otherwise get user prompt from stdin
-                read_stdin("User: ", user_prompt, sizeof(user_prompt));
+                time_in_str(time_str, 80);
+                char io_template[] = "(%s)  User: ";
+                sprintf(user_str, io_template, time_str);
+                read_stdin(user_str, user_prompt, sizeof(user_prompt));
+                // printf("pos %d user_turun %d update_mode %d assistent_idx %d\n",
+                //         pos, user_turn, update_mode, assistent_idx);
                 // TODO: multi-thred to update_memory_cache when user are writting things
                 //
             }
@@ -1148,7 +1171,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, chunk_pos);
-        if (update_mode == 1) {
+        if (update_mode == 1) { // This mode is not thoroughly tested, as during training, memory updates occur every chunk
             for(int l = 0; l < p->n_layers; l++) {
                 update_memory_cache(transformer, transformer->state.mem_cache, chunk_pos, l);
             }
@@ -1162,9 +1185,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
         }
-        if (next == eof) { printf("\n"); }
+        if (next == eof) { printf("\n\n"); }
     }
     printf("\n");
+    // free(system_prompt);
+    // free(user_prompt);
+    // free(rendered_prompt);
     free(prompt_tokens);
 }
 
