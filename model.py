@@ -30,6 +30,9 @@ class ModelArgs:
     memory_norm: bool = False
     train_orimem: bool = False
     reuse_kv: bool = False
+    lora: bool = False
+    update_memory: bool = False
+    use_saved_mem: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -189,6 +192,10 @@ class MemoryAttention(nn.Module):
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
+        # lora
+        if args.lora:
+            # A~N(0, 0.02), B=0
+            pass
         # memory
         self.memseqlen = args.memseqlen
         self.do_wm = args.do_wm
@@ -223,6 +230,11 @@ class MemoryAttention(nn.Module):
             self.origin_mem = nn.Parameter(origin_mem)
         else:
             self.register_buffer("origin_mem", origin_mem)
+        self.register_buffer("memory", torch.zeros([1, self.memseqlen, self.dim]))
+        self.update_memory = args.update_memory
+        if self.update_memory:
+            print('update_memory')
+        self.use_saved_mem = args.use_saved_mem
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -241,7 +253,10 @@ class MemoryAttention(nn.Module):
         bsz, seqlen, _ = x.shape
 
         outputs = []
-        om = self.origin_mem.expand(bsz, self.memseqlen, self.dim)
+        if self.use_saved_mem:
+            om = self.memory.expand(bsz, self.memseqlen, self.dim)
+        else:
+            om = self.origin_mem.expand(bsz, self.memseqlen, self.dim)
         for idx in range(0, seqlen, self.memseqlen):
             subx = x[:, idx:idx+self.memseqlen]
             _, subseqlen, _ = subx.shape
@@ -284,6 +299,8 @@ class MemoryAttention(nn.Module):
             # restore time as batch dimension and concat heads
             om = output.transpose(1, 2).contiguous().view(bsz, self.memseqlen+subseqlen, self.dim)[:, self.memseqlen:]
             outputs.append(om)
+            if self.update_memory:
+                self.memory = om[:1]
 
         output = torch.concat(outputs, dim=1)
         # final projection into the residual stream
@@ -469,7 +486,6 @@ class Transformer(nn.Module):
             if eval_last:
                 logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
                 self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), (targets[:, [-1]]).view(-1), ignore_index=-1)
-                
             else:
                 logits = self.output(h)
                 self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)

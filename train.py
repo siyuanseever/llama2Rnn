@@ -29,7 +29,6 @@ from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from tinystories import Task
 from export import model_export
 
 # -----------------------------------------------------------------------------
@@ -47,6 +46,7 @@ wandb_log = False  # disabled by default
 wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
+task_name = "tinystories"
 batch_size = 128  # if gradient_accumulation_steps > 1, this is the micro-batch size
 max_seq_len = 256
 vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
@@ -66,6 +66,9 @@ do_memory_ffn = False
 memory_norm = False
 train_orimem = False
 reuse_kv = False
+save_memory = ""
+update_memory = False
+use_saved_mem = ""
 # adamw optimizer
 gradient_accumulation_steps = 4  # used to simulate larger batch sizes
 learning_rate = 5e-4  # max learning rate
@@ -83,6 +86,9 @@ dtype = "float32"  # float32|bfloat16|float16
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 # test_model
 test_model = False
+# fixing some hyperparams to sensible defaults
+lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
+min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -92,10 +98,26 @@ config_keys = [
 exec(open("configurator.py").read())  # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys}  # will be useful for logging
 # -----------------------------------------------------------------------------
-
-# fixing some hyperparams to sensible defaults
-lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
-min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# model init
+model_args = dict(
+    dim=dim,
+    n_layers=n_layers,
+    n_heads=n_heads,
+    n_kv_heads=n_kv_heads,
+    vocab_size=vocab_size,
+    multiple_of=multiple_of,
+    max_seq_len=max_seq_len,
+    dropout=dropout,
+    attention_type=attention_type,
+    memseqlen=memseqlen,
+    do_wm=do_wm,
+    do_memory_ffn=do_memory_ffn,
+    memory_norm=memory_norm,
+    train_orimem=train_orimem,
+    reuse_kv=reuse_kv,
+    update_memory=update_memory,
+    use_saved_mem=bool(use_saved_mem),
+)  # start with model_args from command line
 
 # validating checks
 assert vocab_source in ["llama2", "custom"]
@@ -141,6 +163,10 @@ ctx = (
 )
 
 # task-specific setup
+if task_name == 'tinystories':
+    from tinystories import Task
+elif task_name == 'ultrachat':
+    from ultrachat import Task
 iter_batches = partial(
     Task.iter_batches,
     batch_size=batch_size,
@@ -155,24 +181,6 @@ iter_batches = partial(
 iter_num = 0
 best_val_loss = 1e9
 
-# model init
-model_args = dict(
-    dim=dim,
-    n_layers=n_layers,
-    n_heads=n_heads,
-    n_kv_heads=n_kv_heads,
-    vocab_size=vocab_size,
-    multiple_of=multiple_of,
-    max_seq_len=max_seq_len,
-    dropout=dropout,
-    attention_type=attention_type,
-    memseqlen=memseqlen,
-    do_wm=do_wm,
-    do_memory_ffn=do_memory_ffn,
-    memory_norm=memory_norm,
-    train_orimem=train_orimem,
-    reuse_kv=reuse_kv,
-)  # start with model_args from command line
 if init_from == "scratch":
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -181,7 +189,11 @@ if init_from == "scratch":
 else:
     print(f"{init_from}ing training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, "ckpt.pt")
+    if bool(use_saved_mem):
+        ckpt_path = os.path.join(out_dir, f"{use_saved_mem}.pt")
+    else:
+        ckpt_path = os.path.join(out_dir, f"ckpt.pt")
+    print(f'load model from {ckpt_path}')
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint["model_args"]
     # force these config attributes to be equal otherwise we can't even resume training
@@ -198,8 +210,21 @@ else:
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+    # if memory not exits, use origin_mem to initialize
+    if bool(use_saved_mem):
+        for name, buffer in model.named_buffers():
+            if "attention.memory" not in name:
+                continue
+            if name not in state_dict.keys():
+                print(name, buffer.size(), 'not exits, use origin_mem to initialize')
+                origin_mem = state_dict[name.replace('memory', 'origin_mem')] 
+                state_dict[name] = origin_mem.expand(1, memseqlen, dim)
+            else:
+                print(name, buffer.size(), 'exits, use mmeory batch_idx=1 to initialize')
+                state_dict[name] = (state_dict[name][:1]).expand(1, memseqlen, dim)
     if init_from == "resume":
-        model.load_state_dict(state_dict)
+        strict = False if bool(save_memory) else True
+        model.load_state_dict(state_dict, strict=strict)
         iter_num = checkpoint["iter_num"]
         best_val_loss = checkpoint["best_val_loss"]
     elif init_from == "finetune":
@@ -219,10 +244,10 @@ else:
             for np in ft_params:
                 if np in name:
                     param.requires_grad = True
+        for name, param in model.named_parameters():
+            print(name, param.size(), param.requires_grad)
     else:
         assert False, init_from
-for name, param in model.named_parameters():
-    print(name, param.size(), param.requires_grad)
 if test_model:
     exit(0)
 model.to(device)
@@ -264,6 +289,18 @@ def estimate_loss():
             with ctx:
                 _ = model(X, Y, eval_last=eval_last)
                 loss = raw_model.last_loss
+                if bool(save_memory):
+                    checkpoint = {
+                        "model": raw_model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "model_args": model_args,
+                        "iter_num": iter_num,
+                        "best_val_loss": best_val_loss,
+                        "config": config,
+                    }
+                    print(f"saving memory checkpoint to {out_dir}, loss {loss}")
+                    torch.save(checkpoint, os.path.join(out_dir, f"{save_memory}.pt"))
+                    return out
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -305,7 +342,9 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len} "
+              f"use_saved_mem {use_saved_mem}: update_memory {update_memory} "
+              f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             try:
                 wandb.log(
@@ -332,8 +371,6 @@ while True:
             }
             print(f"saving checkpoint to {out_dir}")
             torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
-            if attention_type == "attention":
-                model_export(raw_model, os.path.join(out_dir, "model.bin"), version=0)
     if eval_only:
         break
 
