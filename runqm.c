@@ -448,13 +448,48 @@ void update_memory_cache(Transformer* transformer, float* memory, int mem_pos, i
     memcpy(value_cache_row, s->v, kv_dim * sizeof(*value_cache_row));
 }
 
+void save_memory_to_disk(Transformer* t) {
+    Config* p = &t->config;
+    RunState* s = &t->state;
+
+    char* memory_path = "memory.bin" ;
+    FILE *file = fopen(memory_path, "wb");
+    if (!file) { fprintf(stderr, "couldn't open %s\n", memory_path); exit(EXIT_FAILURE); }
+    fwrite(s->mem_cache, sizeof(float), p->n_layers * p->mem_len * p->dim, file);
+    fclose(file);
+}
+
+int read_memory_from_disk(Transformer* t) {
+    Config* p = &t->config;
+    RunState* s = &t->state;
+    size_t mem_elements = p->n_layers * p->mem_len * p->dim;
+
+    char* memory_path = "memory.bin" ;
+    FILE *file = fopen(memory_path, "rb");
+    if (!file) { fprintf(stderr, "Use initial memory.\n"); return 0; }
+    fprintf(stdout, "Load memory from %s\n", memory_path);
+    if (fread(s->mem_cache, sizeof(float), mem_elements, file) != mem_elements) {
+        fprintf(stderr, "failed read. Use inital memory\n"); return 0; 
+    };
+
+    fclose(file);
+    return 1;
+}
+
 void init_memory_cache(Transformer* t) {
-    int mem_len = t->config.mem_len;
-    int n_layers = t->config.n_layers;
-    float* ori_mem = t->weights.ori_mem;
-    for (int mem_pos = 0; mem_pos < mem_len; mem_pos++) {
-        for(int l = 0; l < n_layers; l++) {
-            update_memory_cache(t, ori_mem, mem_pos, l);
+    Config* p = &t->config;
+    RunState* s = &t->state;
+    TransformerWeights* w = &t->weights;
+
+    // load memory from disk
+    if (read_memory_from_disk(t) != 1) {
+        // load memory from ori_mem 
+        memcpy(s->mem_cache, w->ori_mem,  p->n_layers * p->mem_len * p->dim * sizeof(float));
+    }
+
+    for (int mem_pos = 0; mem_pos < p->mem_len; mem_pos++) {
+        for(int l = 0; l < p->n_layers; l++) {
+            update_memory_cache(t, s->mem_cache, mem_pos, l);
         }
     }
 }
@@ -1054,6 +1089,8 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         fprintf(stderr, "achieved tok/s: %f\n", (pos-1) / (double)(end-start)*1000);
     }
 
+    save_memory_to_disk(transformer);
+
     free(prompt_tokens);
 }
 
@@ -1122,6 +1159,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 // user prompt for position 0 was passed in, use it
                 strcpy(user_prompt, cli_user_prompt);
             } else {
+                // save memory every round chat
+                save_memory_to_disk(transformer);
                 // otherwise get user prompt from stdin
                 time_in_str(time_str, 80);
                 char io_template[] = "(%s)  User: ";
@@ -1206,7 +1245,7 @@ void error_usage() {
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
     fprintf(stderr, "  -s <int>    random seed, default time(NULL)\n");
-    fprintf(stderr, "  -u <string> update memory cache mode\n");
+    fprintf(stderr, "  -u <string> when to update memory, 0 for every chunk, 1 for every token\n");
     fprintf(stderr, "  -n <int>    number of steps to run for, default 256. 0 = max_seq_len\n");
     fprintf(stderr, "  -i <string> input prompt\n");
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
