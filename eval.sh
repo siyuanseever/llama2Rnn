@@ -19,7 +19,7 @@ eval_last=True
 
 # memory save or use
 use_saved_mem="ckpt"
-update_memory=False
+update_memory=True
 save_memory=""
 if [ "$save_memory" ]; then
     update_memory=True
@@ -41,7 +41,7 @@ mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh
 
 
-for ((i=17; i<=20; i++))
+for ((i=8; i<=16; i++))
 do
     if [ $i -ge 14 ]; then
         batch_size=8

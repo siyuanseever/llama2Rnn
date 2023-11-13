@@ -219,16 +219,14 @@ class MemoryAttention(nn.Module):
             self.wkm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
             self.wvm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
         self.dim = args.dim
-        origin_mem = torch.zeros([1, self.memseqlen, self.dim])
-        if args.train_orimem:
-            self.origin_mem = nn.Parameter(origin_mem)
-        else:
-            self.register_buffer("origin_mem", origin_mem)
-        self.register_buffer("memory", torch.zeros([1, self.memseqlen, self.dim]))
         self.update_memory = args.update_memory
-        if self.update_memory:
-            print('update_memory')
         self.use_saved_mem = args.use_saved_mem
+        if args.train_orimem:
+            self.origin_mem = nn.Parameter(torch.zeros([1, self.memseqlen, self.dim]))
+        elif not args.use_saved_mem:
+            self.register_buffer("origin_mem", torch.zeros([1, self.memseqlen, self.dim]))
+        if self.use_saved_mem or self.update_memory:
+            self.register_buffer("memory", torch.zeros([1, self.memseqlen, self.dim]))
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -294,7 +292,7 @@ class MemoryAttention(nn.Module):
             om = output.transpose(1, 2).contiguous().view(bsz, self.memseqlen+subseqlen, self.dim)[:, self.memseqlen:]
             outputs.append(om)
             if self.update_memory:
-                self.memory = om[:1]
+                self.memory.data.copy_(om[:1])
 
         output = torch.concat(outputs, dim=1)
         # final projection into the residual stream
