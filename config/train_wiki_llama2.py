@@ -3,30 +3,47 @@
 
 from datetime import datetime
 
-# I/O
-init_from = "finetune" # finetune or freeze or freeze_ft_attention
-out_dir = "out/custom_4096"
 # data
-batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
+task_name = "wiki"
+batch_size = 8  # if gradient_accumulation_steps > 1, this is the micro-batch size
 vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
-vocab_size = 4096 # the Llama 2 tokenizer has 32K tokens
+vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 
-max_seq_len = 256
+max_seq_len = 1024
+# model
+init_from = "scratch"
+dim = 288
+n_layers = 6
+n_heads = 6
+n_kv_heads = 6
+multiple_of = 32
+dropout = 0.0
 
+# dim = 768
+# n_layers = 12
+# n_heads = 12
+# n_kv_heads = 12
+# multiple_of = 32
+# dropout = 0.1
+# memory
 attention_type = "memory_attention"
-memseqlen = 64 // 2
+memseqlen = 128
 do_wm = False
 do_memory_ffn = True
 memory_norm = True
+reuse_kv = True
+train_orimem = True
 # adamw optimizer
-gradient_accumulation_steps = 4 * 4  # used to simulate larger batch sizes
-learning_rate = 1e-5
-min_lr = 1e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
+assert gradient_accumulation_steps % 8 == 0
+learning_rate = 5e-4  # max learning rate
+max_iters = 200000  # total number of training iterations
+
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 test_model = False
 # I/O
-exp_name = f"{vocab_source}{vocab_size}_len{max_seq_len}"
+exp_name = f"{task_name}_{vocab_source}{vocab_size}_dim{dim}_len{max_seq_len}"
 if attention_type == "memory_attention":
     exp_name += f'_memory{memseqlen}'
     if do_wm:
@@ -35,12 +52,15 @@ if attention_type == "memory_attention":
         exp_name += '_ffn'
     if memory_norm:
         exp_name += '_norm'
-exp_name += f"_{init_from}{learning_rate}-{min_lr}"
-out_dir = f"./out/{exp_name}"
+    if reuse_kv:
+        exp_name += '_reusekv'
+    if train_orimem:
+        exp_name += '_trainmem'
 
+out_dir = f"out/{exp_name}"
 # wandb logging
 wandb_log = True  # disabled by default
-wandb_project = "llamac"
+wandb_project = f"llamac_{task_name}"
 wandb_run_name = exp_name + ' ' + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
 # save config
@@ -53,4 +73,3 @@ if not os.path.exists(out_dir):
     file_name = os.path.basename(current_file)
     destination_path = os.path.join(out_dir, file_name)
     shutil.copy2(current_file, destination_path)
-    print(f'save config to {destination_path}')
