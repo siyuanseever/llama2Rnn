@@ -167,6 +167,12 @@ if task_name == 'tinystories':
     from tinystories import Task
 elif task_name == 'ultrachat':
     from ultrachat import Task
+elif task_name == 'wikipedia_en':
+    from wikipedia_en import Task
+elif task_name == 'wiki':
+    from wiki import Task
+elif task_name == 'zhihu':
+    from zhihu import Task
 iter_batches = partial(
     Task.iter_batches,
     batch_size=batch_size,

@@ -1,0 +1,11 @@
+*.bin
+test*
+wandb/
+run
+runq
+runqm
+
+.ipynb_checkpoints/
+__pycache__/
+data
+out/

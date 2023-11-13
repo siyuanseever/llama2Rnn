@@ -177,7 +177,6 @@ class Attention(nn.Module):
 class MemoryAttention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
-        print('use memory attention')
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         assert args.n_heads % self.n_kv_heads == 0
         model_parallel_size = 1
@@ -200,15 +199,12 @@ class MemoryAttention(nn.Module):
         self.memseqlen = args.memseqlen
         self.do_wm = args.do_wm
         if self.do_wm:
-            print('use wm')
             self.wm = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.memory_norm = args.memory_norm
         if self.memory_norm:
-            print('use memory norm')
             self.memory_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.do_memory_ffn = args.do_memory_ffn
         if self.do_memory_ffn:
-            print('use memory ffn')
             self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
             self.feed_forward = FeedForward(
                 dim=args.dim,
@@ -217,7 +213,6 @@ class MemoryAttention(nn.Module):
                 dropout=args.dropout,
             )
         if args.reuse_kv:
-            print('resue kv')
             self.wqm, self.wkm, self.wvm = self.wq, self.wk, self.wv
         else:
             self.wqm = nn.Linear(args.n_heads * self.head_dim, args.n_heads * self.head_dim, bias=False)
@@ -226,7 +221,6 @@ class MemoryAttention(nn.Module):
         self.dim = args.dim
         origin_mem = torch.zeros([1, self.memseqlen, self.dim])
         if args.train_orimem:
-            print('train original memory')
             self.origin_mem = nn.Parameter(origin_mem)
         else:
             self.register_buffer("origin_mem", origin_mem)
@@ -311,7 +305,6 @@ class MemoryAttention(nn.Module):
 class ChunkLSTM(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
-        print('use LSTM')
         self.memseqlen = args.memseqlen
         self.s_dim = args.dim // args.memseqlen
         self.dim = args.dim
