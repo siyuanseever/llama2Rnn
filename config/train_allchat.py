@@ -4,12 +4,13 @@
 from datetime import datetime
 
 # data
-task_name = "ultrachat"
-batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
-vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+tasks = ["ultrachat", "wikipedia_en", "wiki_zh", "jiiov_rephrase"]
+task_name = "allchat" + "_".join(tasks)
+batch_size = 2  # if gradient_accumulation_steps > 1, this is the micro-batch size
+vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 
-max_seq_len = 256
+max_seq_len = 1024
 # model
 init_from = "scratch"
 dim = 288
@@ -19,30 +20,29 @@ n_kv_heads = 6
 multiple_of = 32
 dropout = 0.0
 
-# dim = 768
-# n_layers = 12
-# n_heads = 12
-# n_kv_heads = 12
-# multiple_of = 32
-# dropout = 0.1
+dim = 768
+n_layers = 12
+n_heads = 12
+n_kv_heads = 12
+multiple_of = 32
+dropout = 0.1
 
 # memory
 attention_type = "memory_attention"
-memseqlen = 64 // 2
+memseqlen = 256
 do_wm = False
 do_memory_ffn = True
 memory_norm = True
 reuse_kv = True
-train_orimem = False
+train_orimem = True
 
 # adamw optimizer
 gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
-gradient_accumulation_steps = 256 // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
 
-# learning_rate = 5e-4  # max learning rate
-# max_iters = 200000  # total number of training iterations
-# lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
-# min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+learning_rate = 5e-4  # max learning rate
+max_iters = 100000  # total number of training iterations
+lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
+min_lr = learning_rate/10  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
@@ -61,8 +61,6 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
-    if update_memory and bool(use_saved_mem):
-        exp_name += '_updatemem'
 
 out_dir = f"out/{exp_name}"
 # wandb logging

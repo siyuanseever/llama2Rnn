@@ -6,12 +6,12 @@ from datetime import datetime
 # data
 task_name = "zhihu"
 batch_size = 8  # if gradient_accumulation_steps > 1, this is the micro-batch size
-vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 
 max_seq_len = 1024
 # model
-init_from = "resume"
+init_from = "scratch"
 dim = 288
 n_layers = 6
 n_heads = 6

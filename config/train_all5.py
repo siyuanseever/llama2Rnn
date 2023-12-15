@@ -4,9 +4,10 @@
 from datetime import datetime
 
 # data
-task_name = "ultrachat"
+tasks = ["ultrachat", "wikipedia_en", "wiki_zh", "zhihu", "jiiov"]
+task_name = f"all{len(tasks)}"
 batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
-vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 
 max_seq_len = 256
@@ -27,22 +28,21 @@ dropout = 0.0
 # dropout = 0.1
 
 # memory
-attention_type = "memory_attention"
-memseqlen = 64 // 2
-do_wm = False
-do_memory_ffn = True
+attention_type = "attention"
+memseqlen = 32
+do_wm = True
+do_memory_ffn = False
 memory_norm = True
 reuse_kv = True
-train_orimem = False
+train_orimem = True
 
 # adamw optimizer
 gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
-gradient_accumulation_steps = 256 // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
 
-# learning_rate = 5e-4  # max learning rate
-# max_iters = 200000  # total number of training iterations
-# lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
-# min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+learning_rate = 5e-4  # max learning rate
+max_iters = 100000  # total number of training iterations
+lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
+min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
@@ -61,8 +61,6 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
-    if update_memory and bool(use_saved_mem):
-        exp_name += '_updatemem'
 
 out_dir = f"out/{exp_name}"
 # wandb logging

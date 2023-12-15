@@ -23,6 +23,7 @@ from tokenizer import Tokenizer
 DATA_CACHE_DIR = "data"
 DATA_NAME_DIR = "zhihu"
 TRAIN_DATA_DIRS = ["wikipedia_en", "wiki_zh"]
+TOKENIZER_DIR = "wiki"
 
 def download_file(url: str, fname: str, chunk_size=1024):
     """Helper function to download a file from a given url"""

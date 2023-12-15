@@ -13,19 +13,23 @@ max_seq_len = 256
 init_from = "scratch"
 # memory
 attention_type = "attention"
+extend_method = "logn_train"
+
+# attention_type = "attention"
 memseqlen = 64 // 2
-do_wm = False
-do_memory_ffn = True
+do_wm = True
+do_memory_ffn = False
 memory_norm = True
 reuse_kv = True
 train_orimem = True
+
 # adamw optimizer
-gradient_accumulation_steps = 4 * 4  # used to simulate larger batch sizes
+gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 test_model = False
 # I/O
-exp_name = f"{vocab_source}{vocab_size}_len{max_seq_len}"
+exp_name = f"retry_{vocab_source}{vocab_size}_len{max_seq_len}"
 if attention_type == "memory_attention":
     exp_name += f'_memory{memseqlen}'
     if do_wm:
@@ -38,6 +42,9 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
+elif attention_type == "attention":
+    if extend_method:
+        exp_name += f'_{extend_method}'
 
 out_dir = f"out/{exp_name}"
 # wandb logging
@@ -51,7 +58,8 @@ import shutil
 import inspect
 if not os.path.exists(out_dir):
     os.mkdir(out_dir)
-current_file = inspect.getmodule(lambda: None).__file__
-file_name = os.path.basename(current_file)
-destination_path = os.path.join(out_dir, file_name)
-shutil.copy2(current_file, destination_path)
+    current_file = inspect.getmodule(lambda: None).__file__
+    file_name = os.path.basename(current_file)
+    destination_path = os.path.join(out_dir, file_name)
+    shutil.copy2(current_file, destination_path)
+    print('save at', destination_path)

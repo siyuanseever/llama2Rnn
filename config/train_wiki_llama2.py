@@ -37,7 +37,9 @@ train_orimem = True
 gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
 assert gradient_accumulation_steps % 8 == 0
 learning_rate = 5e-4  # max learning rate
-max_iters = 200000  # total number of training iterations
+max_iters = 100000  # total number of training iterations
+lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
+min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
@@ -56,6 +58,8 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
+exp_name += '_retry'
+
 
 out_dir = f"out/{exp_name}"
 # wandb logging

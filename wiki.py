@@ -51,13 +51,13 @@ class PretokDataset(torch.utils.data.IterableDataset):
             if self.vocab_source == "llama2":
                 # the .bin files are right along the .json files
                 bin_dir = os.path.join(DATA_CACHE_DIR, data_name)
-                shard_filenames = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
+                sub_shards = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
             elif self.vocab_source == "custom":
                 # the .bin files are in tok{N} directory
                 bin_dir = os.path.join(DATA_CACHE_DIR, data_name, f"tok{self.vocab_size}")
                 sub_shards = sorted(glob.glob(os.path.join(bin_dir, "*.bin")))
-                sub_shards = sub_shards[1:] if self.split == "train" else sub_shards[:1]
-                shard_filenames.extend(sub_shards)
+            sub_shards = sub_shards[1:] if self.split == "train" else sub_shards[:1]
+            shard_filenames.extend(sub_shards)
         # train/test split. let's use only shard 0 for test split, rest train
         assert len(shard_filenames)>0, f"No bin files found in {bin_dir}"
         while True:

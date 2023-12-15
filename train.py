@@ -25,7 +25,7 @@ from functools import partial
 from tqdm import tqdm
 
 import torch
-from model import Transformer, ModelArgs
+from model import Transformer, ModelArgs, precompute_freqs_cis
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -46,9 +46,11 @@ wandb_log = False  # disabled by default
 wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
+tasks = []
 task_name = "tinystories"
 batch_size = 128  # if gradient_accumulation_steps > 1, this is the micro-batch size
 max_seq_len = 256
+extend_method = "extrapolation"
 vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 # model
@@ -107,6 +109,8 @@ model_args = dict(
     vocab_size=vocab_size,
     multiple_of=multiple_of,
     max_seq_len=max_seq_len,
+    extend_seq_len=max_seq_len,
+    extend_method=extend_method,
     dropout=dropout,
     attention_type=attention_type,
     memseqlen=memseqlen,
@@ -163,25 +167,42 @@ ctx = (
 )
 
 # task-specific setup
+num_workers = os.cpu_count() // ddp_world_size - 1
+task_args = dict(
+    batch_size=batch_size,
+    max_seq_len=max_seq_len,
+    vocab_size=vocab_size,
+    vocab_source=vocab_source,
+    device=device,
+    num_workers = num_workers,
+)
 if task_name == 'tinystories':
     from tinystories import Task
 elif task_name == 'ultrachat':
     from ultrachat import Task
 elif task_name == 'wikipedia_en':
     from wikipedia_en import Task
+elif task_name == 'wiki_zh':
+    from wiki_zh import Task
 elif task_name == 'wiki':
     from wiki import Task
 elif task_name == 'zhihu':
     from zhihu import Task
-iter_batches = partial(
-    Task.iter_batches,
-    batch_size=batch_size,
-    max_seq_len=max_seq_len,
-    vocab_size=vocab_size,
-    vocab_source=vocab_source,
-    device=device,
-    num_workers=0,
-)
+elif task_name == 'jiiov':
+    from jiiov import Task
+elif task_name.startswith('all'):
+    from datatask import Task
+    task_args["tasks"] = tasks
+elif task_name.startswith('ds_'):
+    from dataset import Task
+    tasks = task_name[len('ds_'):].split('_')
+    task_args["tasks"] = tasks
+elif task_name.startswith('dg_'):
+    from data_generator import Task
+    tasks = task_name[len('dg_'):].split('_')
+    task_args["tasks"] = tasks
+print(f'task num workers = {num_workers}')
+iter_batches = partial(Task.iter_batches, **task_args)
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -195,10 +216,8 @@ if init_from == "scratch":
 else:
     print(f"{init_from}ing training from {out_dir}")
     # resume training from a checkpoint.
-    if bool(use_saved_mem):
-        ckpt_path = os.path.join(out_dir, f"{use_saved_mem}.pt")
-    else:
-        ckpt_path = os.path.join(out_dir, f"ckpt.pt")
+    ckpt_path = os.path.join(out_dir, f"{use_saved_mem}.pt") if bool(use_saved_mem) else \
+        os.path.join(out_dir, "ckpt.pt")
     print(f'load model from {ckpt_path}')
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint["model_args"]
@@ -216,6 +235,7 @@ else:
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+    state_dict = {k: v for k, v in state_dict.items() if 'attention.mask' not in k}
     # if memory not exits, use origin_mem to initialize
     if bool(use_saved_mem):
         for name, buffer in model.named_buffers():
@@ -229,8 +249,7 @@ else:
                 print(name, buffer.size(), 'exits, use mmeory batch_idx=1 to initialize')
                 state_dict[name] = (state_dict[name][:1]).expand(1, memseqlen, dim)
     if init_from == "resume":
-        strict = False if bool(save_memory) else True
-        model.load_state_dict(state_dict, strict=strict)
+        model.load_state_dict(state_dict, strict=False)
         iter_num = checkpoint["iter_num"]
         best_val_loss = checkpoint["best_val_loss"]
     elif init_from == "finetune":
@@ -348,9 +367,12 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len} "
-              f"use_saved_mem {use_saved_mem}: update_memory {update_memory} "
-              f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(
+            f"task {task_name} extend_method {extend_method} "
+            f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len} "
+            # f"use_saved_mem {use_saved_mem}: update_memory {update_memory} "
+            f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+        )
         if wandb_log:
             try:
                 wandb.log(
@@ -382,6 +404,7 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
+    dt_data = 0
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
@@ -394,7 +417,9 @@ while True:
             loss = raw_model.last_loss
             loss = loss / gradient_accumulation_steps
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
+        td = time.time()
         X, Y = next(train_batch_iter)
+        dt_data += time.time() - td
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -418,7 +443,8 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
         print(
-            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | mfu {running_mfu*100:.2f}% | mem: {torch.cuda.max_memory_allocated()/1e9:.2f} GB"
+            f"{iter_num} | loss {lossf:.4f} | lr {lr:e} | {dt*1000:.2f}ms | data {dt_data*1000:.2f}ms"
+            f" | mfu {running_mfu*100:.2f}% | mem {torch.cuda.max_memory_allocated()/1e9:.2f} GB"
         )
     iter_num += 1
     local_iter_num += 1

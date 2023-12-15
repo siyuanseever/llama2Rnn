@@ -5,8 +5,8 @@ from datetime import datetime
 
 # data
 task_name = "ultrachat"
-batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
-vocab_source = "llama2" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
+batch_size = 8  # if gradient_accumulation_steps > 1, this is the micro-batch size
+vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 32000 # the Llama 2 tokenizer has 32K tokens
 
 max_seq_len = 1024
@@ -27,7 +27,9 @@ memory_norm = True
 reuse_kv = True
 train_orimem = True
 # adamw optimizer
-gradient_accumulation_steps = 4 * 4  # used to simulate larger batch sizes
+gradient_accumulation_steps = 4 * 4 * 2  # used to simulate larger batch sizes
+learning_rate = 1e-5
+min_lr = 1e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # system
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 test_model = False
@@ -45,8 +47,8 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
-exp_name += '_finetunewiki-en'
-
+exp_name += '_ft_wiki'
+exp_name += f"{learning_rate}-{min_lr}"
 out_dir = f"out/{exp_name}"
 # wandb logging
 wandb_log = True  # disabled by default
