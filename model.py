@@ -35,6 +35,7 @@ class ModelArgs:
     lora: bool = False
     update_memory: bool = False
     use_saved_mem: bool = False
+    key_norm: bool = False
 
 
 class RMSNorm(torch.nn.Module):
@@ -49,6 +50,10 @@ class RMSNorm(torch.nn.Module):
     def forward(self, x):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
+
+
+def l2norm(x: torch.tensor, eps: float):
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0):
@@ -187,7 +192,7 @@ class Attention(nn.Module):
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
         mask0 = torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=0)
-        if "CBA" in args.extend_method:
+        if "BCA" in args.extend_method:
             mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-args.max_seq_len)
             self.register_buffer("mask", mask)
         else:
@@ -199,6 +204,8 @@ class Attention(nn.Module):
             self.window = args.max_seq_len // 2
             rectified_mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-self.window)
             self.register_buffer("rectified_mask", rectified_mask)
+        if args.key_norm:
+            print("use key norm")
 
     def forward(
         self,
@@ -222,6 +229,7 @@ class Attention(nn.Module):
         logn = True if 'logn' in self.args.extend_method else False
         eval_only = False if 'train' in self.args.extend_method else True
         xq = apply_logn(xq, self.args.max_seq_len, eval_only) if logn else xq
+        xk = l2norm(xk, self.args.norm_eps) if self.args.key_norm else xk
 
         # grouped multiquery attention: expand out keys and values
         xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -238,7 +246,8 @@ class Attention(nn.Module):
                 window=self.window
             )
             xq2 = apply_logn(xq2, self.args.max_seq_len, eval_only) if logn else xq2
-            xk2 = repeat_kv(xk_tmp, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            xk2 = l2norm(xk_tmp, self.args.norm_eps) if self.args.key_norm else xk_tmp
+            xk2 = repeat_kv(xk2, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
             xq2 = xq2.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
             xk2 = xk2.transpose(1, 2)
 
@@ -291,10 +300,8 @@ class MemoryAttention(nn.Module):
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
-        # lora
-        if args.lora:
-            # A~N(0, 0.02), B=0
-            pass
+        self.args = args
+
         # memory
         self.memseqlen = args.memseqlen
         self.do_wm = args.do_wm
@@ -335,6 +342,8 @@ class MemoryAttention(nn.Module):
             mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
+        if args.key_norm:
+            print("use key norm")
 
     def forward(
         self,
@@ -376,6 +385,10 @@ class MemoryAttention(nn.Module):
 
             # RoPE relative positional embeddings
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos[:self.memseqlen+subseqlen], freqs_sin[:self.memseqlen+subseqlen])
+            logn = True if 'logn' in self.args.extend_method else False
+            eval_only = False if 'train' in self.args.extend_method else True
+            xq = apply_logn(xq, self.args.max_seq_len, eval_only) if logn else xq
+            xk = l2norm(xk, self.args.norm_eps) if self.args.key_norm else xk
 
             # grouped multiquery attention: expand out keys and values
             xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -573,6 +586,7 @@ class Transformer(nn.Module):
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
         self.last_loss = None
+        self.last_acc = None
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -582,12 +596,25 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None, eval_last: bool = False) -> torch.Tensor:
+    def _repeat_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        # 获取tokens的最后self.params.max_seq_len部分
+        last_tokens = tokens[:, -self.params.max_seq_len:]
+        # 重复last_tokens直到它和原始tokens的长度一样
+        repeated_tokens = last_tokens.repeat(1, tokens.size(1) // last_tokens.size(1))
+        return repeated_tokens
+
+    def forward(self, 
+        tokens: torch.Tensor, targets: Optional[torch.Tensor] = None, 
+        eval_last: bool = False, repeat_tokens: bool = False,
+    ) -> torch.Tensor:
         if self.params.extend_method == "clip":
             tokens = tokens[:, -self.params.max_seq_len:]
             targets = targets[:, -self.params.max_seq_len:]
+        if repeat_tokens:
+            tokens = self._repeat_tokens(tokens)
+            targets = self._repeat_tokens(targets)
 
-        _bsz, seqlen = tokens.shape
+        bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
@@ -599,22 +626,21 @@ class Transformer(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
+            logits = self.output(h[:, -self.params.max_seq_len:, :])
+            targets = targets[:, -self.params.max_seq_len:]
             if eval_last:
-                logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
-                self.last_loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
-                    (targets[:, [-1]]).view(-1),
-                    ignore_index=-1
-                )
-            else:
-                logits = self.output(h[:, -self.params.max_seq_len:, :])
-                self.last_loss = F.cross_entropy(
-                    logits.reshape(-1, logits.size(-1)), 
-                    targets[:, -self.params.max_seq_len:].reshape(-1),
-                    ignore_index=-1
-                )
-                # logits = self.output(h)
-                # self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+                logits = logits[:, [-1], :]
+                targets = targets[:, [-1]]
+            self.last_loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), 
+                targets.reshape(-1),
+                ignore_index=-1
+            )
+
+            _, predicts = torch.max(logits, -1)
+            ignore_mask = targets != -1
+            total_samples = ignore_mask.sum()
+            self.last_acc = ((predicts == targets) & ignore_mask).sum().float() / total_samples.float()
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim

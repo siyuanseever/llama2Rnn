@@ -25,11 +25,9 @@ from functools import partial
 from tqdm import tqdm
 
 import torch
-from model import Transformer, ModelArgs, precompute_freqs_cis
+from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-from export import model_export
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -39,6 +37,7 @@ log_interval = 1
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
 eval_last = False
+repeat_tokens = False
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 init_from = "scratch"  # 'scratch' or 'resume'
 # wandb logging
@@ -60,6 +59,8 @@ n_heads = 6
 n_kv_heads = 6
 multiple_of = 32
 dropout = 0.0
+# extrapolation
+key_norm = False
 # memory
 attention_type = "attention"
 memseqlen = 128
@@ -121,6 +122,7 @@ model_args = dict(
     reuse_kv=reuse_kv,
     update_memory=update_memory,
     use_saved_mem=bool(use_saved_mem),
+    key_norm=key_norm,
 )  # start with model_args from command line
 
 # validating checks
@@ -168,6 +170,7 @@ ctx = (
 
 # task-specific setup
 num_workers = os.cpu_count() // ddp_world_size - 1
+print(f'task num workers = {num_workers}')
 task_args = dict(
     batch_size=batch_size,
     max_seq_len=max_seq_len,
@@ -201,7 +204,6 @@ elif task_name.startswith('dg_'):
     from data_generator import Task
     tasks = task_name[len('dg_'):].split('_')
     task_args["tasks"] = tasks
-print(f'task num workers = {num_workers}')
 iter_batches = partial(Task.iter_batches, **task_args)
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -303,17 +305,20 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
-    out = {"train": 0.0, "val": 0.0}
+    out = {"train_loss": 0.0, "val_loss": 0.0, "train_acc": 0.0, "val_acc": 0.0}
     model.eval()
     splits = ["val"] if eval_only else ["train", "val"]
     for split in splits:
         batch_iter = iter_batches(split=split)
         losses = torch.zeros(eval_iters)  # keep on CPU
+        acces = torch.zeros(eval_iters)  # keep on CPU
         for k in tqdm(range(eval_iters)):
             X, Y = next(batch_iter)
             with ctx:
-                _ = model(X, Y, eval_last=eval_last)
+                _ = model(X, Y, eval_last=eval_last, repeat_tokens=repeat_tokens)
                 loss = raw_model.last_loss
+                acc = raw_model.last_acc
+
                 if bool(save_memory):
                     checkpoint = {
                         "model": raw_model.state_dict(),
@@ -323,11 +328,13 @@ def estimate_loss():
                         "best_val_loss": best_val_loss,
                         "config": config,
                     }
-                    print(f"saving memory checkpoint to {out_dir}, loss {loss}")
+                    print(f"saving memory checkpoint to {out_dir}, loss {loss}, acc {acc}")
                     torch.save(checkpoint, os.path.join(out_dir, f"{save_memory}.pt"))
                     return out
             losses[k] = loss.item()
-        out[split] = losses.mean()
+            acces[k] = acc.item()
+        out[split+"_loss"] = losses.mean()
+        out[split+"_acc"] = acces.mean()
     model.train()
     return out
 
@@ -368,10 +375,12 @@ while True:
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(
-            f"task {task_name} extend_method {extend_method} "
-            f"step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len} "
+            f" task {task_name} extend_method {extend_method}"
+            f" step {iter_num} eval_last {eval_last} max_seq_len {max_seq_len}"
+            f" repeat_tokens {repeat_tokens}"
             # f"use_saved_mem {use_saved_mem}: update_memory {update_memory} "
-            f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+            f" train loss {losses['train_loss']:.4f}, val loss {losses['val_loss']:.4f}"
+            f" train acc {losses['train_acc']:.4f}, val acc {losses['val_acc']:.4f}"
         )
         if wandb_log:
             try:
@@ -379,16 +388,18 @@ while True:
                     {
                         "iter": iter_num,
                         "tokens": iter_num * tokens_per_iter,
-                        "loss/train": losses["train"],
-                        "loss/val": losses["val"],
+                        "loss/train": losses["train_loss"],
+                        "loss/val": losses["val_loss"],
+                        "acc/train": losses["train_acc"],
+                        "acc/val": losses["val_acc"],
                         "lr": lr,
                         "mfu": running_mfu * 100,  # convert to percentage
                     }, step = iter_num
                 )
             except Exception as e:
                 print(f"logging to wandb failed: {e}")
-        if (losses["val"] < best_val_loss and not eval_only) or always_save_checkpoint:
-            best_val_loss = losses["val"]
+        if (losses["val_loss"] < best_val_loss and not eval_only) or always_save_checkpoint:
+            best_val_loss = losses["val_loss"]
             checkpoint = {
                 "model": raw_model.state_dict(),
                 "optimizer": optimizer.state_dict(),

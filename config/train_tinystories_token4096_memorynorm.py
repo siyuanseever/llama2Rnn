@@ -11,14 +11,16 @@ vocab_size = 4096 # the Llama 2 tokenizer has 32K tokens
 
 max_seq_len = 256
 init_from = "scratch"
-# memory
-attention_type = "attention"
-extend_method = "logn_train"
 
+# memory
 # attention_type = "attention"
+attention_type = "memory_attention"
+extend_method = "logn_train"
+key_norm = True
+
 memseqlen = 64 // 2
-do_wm = True
-do_memory_ffn = False
+do_wm = False
+do_memory_ffn = True
 memory_norm = True
 reuse_kv = True
 train_orimem = True
@@ -42,9 +44,10 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
-elif attention_type == "attention":
-    if extend_method:
-        exp_name += f'_{extend_method}'
+if extend_method:
+    exp_name += f'_{extend_method}'
+if key_norm:
+    exp_name += '_keynorm'
 
 out_dir = f"out/{exp_name}"
 # wandb logging
