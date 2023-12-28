@@ -79,6 +79,21 @@ To run the Llama2RNN model indefinitely, use the following command:
 ./runqm llama2Rnn_toy20M_q80.bin -z llama2_tokenizer.bin -m chat
 ```
 
+## How to Train
+
+### 1.llama2.c
+Refer to [README_llama2.c.md](./README_llama2.c.md) for data processing.
+```bash
+python3 tinystories.py download
+python3 tinystories.py pretokenize --vocab_size=4096
+python3 tokenizer.py --tokenizer-model ./data/tok4096.model
+```
+### Training
+```bash
+python3 train.py config/train_tinystories_token4096_memorynorm.py
+python3 export.py out_path/model_q80.bin --version 2 --mem --checkpoint out_path/ckpt.pt
+```
+
 ## Change Log
 
 - 2023.11.03

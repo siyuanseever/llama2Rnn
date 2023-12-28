@@ -25,6 +25,9 @@
 * attention外推的各种改进方案只能缓解泛化问题，但仍然不会有序列长度收益存在。也就是说，随序列长度的增加性能会变好
 * 而memory attention可以实现外推长度的性能收益，而且明确有长度越长性能越好。
 
+详细结果：
+- [Memory Attention: 增强Transformer的外推性能](https://zhuanlan.zhihu.com/p/669266950)
+
 示例
 ```bash
 # mode = llama2Rnn_toy20M_q80.bin, train_seq_len = 256, attention_seq_len = 32
@@ -94,10 +97,15 @@ oss cp s3://lsy/llama2rnn.c/llama2_tokenizer.bin .
 ### 1.llama2.c
 参考[README_llama2.c.md](./README_llama2.c.md)处理好数据
 ```bash
+python3 tinystories.py download
 python3 tinystories.py pretokenize --vocab_size=4096
 python3 tokenizer.py --tokenizer-model ./data/tok4096.model
 ```
-### 
+### 训练
+```bash
+python3 train.py config/train_tinystories_token4096_memorynorm.py
+export.py out_path/model_q80.bin --version 2 --mem --checkpoint out_path/ckpt.pt
+```
 
 ## 模型列表
 
