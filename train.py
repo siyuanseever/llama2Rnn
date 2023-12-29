@@ -84,7 +84,9 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 1000  # how many steps to warm up for
 # system
-device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+# device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 dtype = "float32"  # float32|bfloat16|float16
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 # test_model
@@ -170,6 +172,7 @@ ctx = (
 
 # task-specific setup
 num_workers = os.cpu_count() // ddp_world_size - 1
+num_workers = 0
 print(f'task num workers = {num_workers}')
 task_args = dict(
     batch_size=batch_size,

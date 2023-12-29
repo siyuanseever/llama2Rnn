@@ -51,7 +51,7 @@ if key_norm:
 
 out_dir = f"out/{exp_name}"
 # wandb logging
-wandb_log = True  # disabled by default
+wandb_log = False  # disabled by default
 wandb_project = "llamac"
 wandb_run_name = exp_name + ' ' + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
@@ -60,7 +60,7 @@ import os
 import shutil
 import inspect
 if not os.path.exists(out_dir):
-    os.mkdir(out_dir)
+    os.makedirs(out_dir)
     current_file = inspect.getmodule(lambda: None).__file__
     file_name = os.path.basename(current_file)
     destination_path = os.path.join(out_dir, file_name)
