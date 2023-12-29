@@ -9,6 +9,21 @@
 - **rnn**: 每个token的 attention sequence 长度固定，计算和内存开销不会增加，理论上支持无限长序列，可以从硬盘读取和保存记忆
 - **.c**: 可以在本地设备上运行，甚至是移动平台
 
+## 更新
+
+- 202312.28
+    - 添加训练代码
+- 2023.12.19
+    - 增加中文模型
+- 2023.11.13
+    - 优化memory save，包括kv cache和token position
+- 2023.11.06
+    - update 20M(22M) chat model: memory length 从32增加到128（val loss 2.1 -> 1.6）
+    - 增加记忆管理功能
+- 2023.11.03
+    - 量化代码
+    - release 20M chat model
+
 
 ## Memory Attention：一种不需要考虑位置编码外推的RNN结构
 
@@ -94,16 +109,22 @@ oss cp s3://lsy/llama2rnn.c/llama2_tokenizer.bin .
 
 ## 如何训练
 
-### 1.llama2.c
+### 数据处理
 参考[README_llama2.c.md](./README_llama2.c.md)处理好数据
+
 ```bash
 python3 tinystories.py download
+python3 tinystories.py train_vocab --vocab_size=4096
 python3 tinystories.py pretokenize --vocab_size=4096
-python3 tokenizer.py --tokenizer-model ./data/tok4096.model
 ```
 ### 训练
 ```bash
 python3 train.py config/train_tinystories_token4096_memorynorm.py
+```
+
+### 保存
+```bash
+python3 tokenizer.py --tokenizer-model ./data/tok4096.model
 export.py out_path/model_q80.bin --version 2 --mem --checkpoint out_path/ckpt.pt
 ```
 
@@ -115,20 +136,6 @@ export.py out_path/model_q80.bin --version 2 --mem --checkpoint out_path/ckpt.pt
 | 178M    | 英文模型，数据为wikipedia |
 | 178M_zh | 中文模型，数据包括moss    |
 
-## 更新记录
-
-- 202312.28
-    - 添加训练代码
-- 2023.12.19
-    - 增加中文模型
-- 2023.11.13
-    - 优化memory save，包括kv cache和token position
-- 2023.11.06
-    - update 20M(22M) chat model: memory length 从32增加到128（val loss 2.1 -> 1.6）
-    - 增加记忆管理功能
-- 2023.11.03
-    - 量化代码
-    - release 20M chat model
 
 ## 未来改进
 
