@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # data
-task_name="tinystories_repeat"
+task_name="tinystories_reverse"
 vocab_source="custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size=4096 # the Llama 2 tokenizer has 32K tokens
 
@@ -13,19 +13,20 @@ repeat_tokens=False
 
 # model
 attention_type="attention"
-extend_method="interpolation_logn"
+extend_method="selfExtend_logn"
 key_norm=False
 
 
 # I/O
-out_dir=./out/retry2_repeat_custom4096_len256
-# out_dir=./out/retry_repeat_custom4096_len256_nope
+out_dir=./out/retry_reverse_custom4096_len256
+# out_dir=./out/retry_reverse_custom4096_len1024
+# out_dir=./out/retry_reverse_custom4096_len256_nope
 
 mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh
 
 
-for ((i=8; i<=12; i++))
+for ((i=8; i<=10; i++))
 do
     if [ $i -ge 14 ]; then
         batch_size=8

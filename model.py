@@ -64,6 +64,14 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0):
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
 
+def floor_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device) // k  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    freqs_cos = torch.cos(freqs)  # real part
+    freqs_sin = torch.sin(freqs)  # imaginary part
+    return freqs_cos, freqs_sin
+
 def ntk_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0, b = 0.75):
     a = np.log(k) / (dim / 2)**b
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
@@ -146,6 +154,50 @@ def apply_rotary_emb_window(
 
     return xq_out.type_as(xq)
 
+def apply_rotary_emb_group(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor,
+    window: int,
+    group: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    extend_seq_len, dim = freqs_cos.shape
+    use_seq_len = (extend_seq_len + group - 1) // group
+    shift = window - (window + group - 1) // group
+
+    # reshape xq and xk to match the complex representation
+    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
+    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+
+    k_freqs_cos = freqs_cos[:use_seq_len, None, :].expand(
+            use_seq_len, group, dim).reshape(-1, dim)[:extend_seq_len]
+    k_freqs_sin = freqs_sin[:use_seq_len, None, :].expand(
+            use_seq_len, group, dim).reshape(-1, dim)[:extend_seq_len]
+    q_freqs_cos = freqs_cos[shift:shift+use_seq_len, None, :].expand(
+            use_seq_len, group, dim).reshape(-1, dim)[-extend_seq_len:]
+    q_freqs_sin = freqs_sin[shift:shift+use_seq_len, None, :].expand(
+            use_seq_len, group, dim).reshape(-1, dim)[-extend_seq_len:]
+
+    # reshape freqs_cos and freqs_sin for broadcasting
+    k_freqs_cos = reshape_for_broadcast(k_freqs_cos, xk_r)
+    k_freqs_sin = reshape_for_broadcast(k_freqs_sin, xk_r)
+    q_freqs_cos = reshape_for_broadcast(q_freqs_cos, xq_r)
+    q_freqs_sin = reshape_for_broadcast(q_freqs_sin, xq_r)
+
+    # apply rotation using real numbers
+    xq_out_r = xq_r * q_freqs_cos - xq_i * q_freqs_sin
+    xq_out_i = xq_r * q_freqs_sin + xq_i * q_freqs_cos
+    xk_out_r = xk_r * k_freqs_cos - xk_i * k_freqs_sin
+    xk_out_i = xk_r * k_freqs_sin + xk_i * k_freqs_cos
+
+    # flatten last two dimensions
+    xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1).flatten(3)
+    xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
+
+
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -169,7 +221,7 @@ def repeat_freqs_clip(freqs: torch.Tensor, n_rep: int) -> torch.Tensor:
     return torch.concat([repeated_freqs, freqs], axis=0)
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         assert args.n_heads % self.n_kv_heads == 0
@@ -186,9 +238,11 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
         self.args = args
+        self.layer_id = layer_id
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        print(f'extend_seq_len: {args.extend_seq_len}, max_seq_len: {args.max_seq_len}')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
         mask0 = torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=0)
@@ -201,9 +255,19 @@ class Attention(nn.Module):
             self.register_buffer("mask_inf", mask)
             self.register_buffer("mask", mask0)
         if "ReRoPE" in args.extend_method:
-            self.window = args.max_seq_len // 2
+            # self.window = (args.max_seq_len+1) // 2
+            self.window = args.max_seq_len - 1 
             rectified_mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-self.window)
             self.register_buffer("rectified_mask", rectified_mask)
+            print(f"window: {self.window}")
+        elif "selfExtend" in args.extend_method:
+            # self.window = args.max_seq_len * 2 // 3
+            self.window = (args.max_seq_len+1) // 4
+            left_size = args.max_seq_len//2 - self.window
+            self.group = (args.extend_seq_len - self.window + left_size -1) // left_size
+            rectified_mask = mask0 ^ torch.extra_argsnes(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-self.window)
+            self.register_buffer("rectified_mask", rectified_mask)
+            print(f"window: {self.window}, group: {self.group}")
         if args.key_norm:
             print("use key norm")
 
@@ -221,11 +285,13 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq_tmp = xq
-        xk_tmp = xk
+        if 'ReRoPE' in self.args.extend_method or 'selfExtend' in self.args.extend_method:
+            xq_tmp = xq
+            xk_tmp = xk
 
         # RoPE relative positional embeddings
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+        if 'nope' not in self.args.extend_method:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
         logn = True if 'logn' in self.args.extend_method else False
         eval_only = False if 'train' in self.args.extend_method else True
         xq = apply_logn(xq, self.args.max_seq_len, eval_only) if logn else xq
@@ -247,6 +313,25 @@ class Attention(nn.Module):
             )
             xq2 = apply_logn(xq2, self.args.max_seq_len, eval_only) if logn else xq2
             xk2 = l2norm(xk_tmp, self.args.norm_eps) if self.args.key_norm else xk_tmp
+            xk2 = repeat_kv(xk2, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            xq2 = xq2.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk2 = xk2.transpose(1, 2)
+
+            # manual implementation
+            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            scores2 = torch.matmul(xq2, xk2.transpose(2, 3)) / math.sqrt(self.head_dim)
+            scores = torch.where(self.rectified_mask, scores, scores2)
+            scores = scores + self.mask_inf[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+        elif 'selfExtend' in self.args.extend_method:
+            xq2, xk2 = apply_rotary_emb_group(
+                xq_tmp, xk_tmp, freqs_cos, freqs_sin,
+                window=self.window, group=self.group
+            )
+            xq2 = apply_logn(xq2, self.args.max_seq_len, eval_only) if logn else xq2
+            xk2 = l2norm(xk2, self.args.norm_eps) if self.args.key_norm else xk2
             xk2 = repeat_kv(xk2, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
             xq2 = xq2.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
             xk2 = xk2.transpose(1, 2)
@@ -330,18 +415,15 @@ class MemoryAttention(nn.Module):
         self.use_saved_mem = args.use_saved_mem
         if args.train_orimem:
             self.origin_mem = nn.Parameter(torch.zeros([1, self.memseqlen, self.dim]))
-        elif not args.use_saved_mem:
+        else:
             self.register_buffer("origin_mem", torch.zeros([1, self.memseqlen, self.dim]))
         if self.use_saved_mem or self.update_memory:
-            self.register_buffer("memory", torch.zeros([1, self.memseqlen, self.dim]))
+            self.register_buffer("memory", torch.zeros([32, self.memseqlen, self.dim]))
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
+            assert False
         if args.key_norm:
             print("use key norm")
 
@@ -354,8 +436,12 @@ class MemoryAttention(nn.Module):
         bsz, seqlen, _ = x.shape
 
         outputs = []
-        if self.use_saved_mem:
-            om = self.memory.expand(bsz, self.memseqlen, self.dim)
+        if self.use_saved_mem or self.update_memory:
+            mbsz = self.memory.shape[0]
+            if mbsz == 1:
+                om = self.memory.expand(bsz, self.memseqlen, self.dim)
+            else:
+                om = self.memory.clone().detach()
         else:
             om = self.origin_mem.expand(bsz, self.memseqlen, self.dim)
         for idx in range(0, seqlen, self.memseqlen):
@@ -404,8 +490,12 @@ class MemoryAttention(nn.Module):
             # restore time as batch dimension and concat heads
             om = output.transpose(1, 2).contiguous().view(bsz, self.memseqlen+subseqlen, self.dim)[:, self.memseqlen:]
             outputs.append(om)
-            if self.update_memory:
-                self.memory.data.copy_(om[:1])
+        if self.update_memory:
+            # self.memory.data.copy_(om.clone().detach())
+            if 'emamem' in self.args.extend_method:
+                self.memory = self.memory * 0.6 + om.clone().detach() * 0.4
+            else:
+                self.memory = om.clone().detach()
 
         output = torch.concat(outputs, dim=1)
         # final projection into the residual stream
@@ -514,7 +604,7 @@ class TransformerBlock(nn.Module):
         elif args.attention_type == "LSTM":
             self.attention = ChunkLSTM(args)
         else:
-            self.attention = Attention(args)
+            self.attention = Attention(layer_id, args)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=args.hidden_dim,
@@ -558,6 +648,8 @@ class Transformer(nn.Module):
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len)
         elif "interpolation" in self.params.extend_method:
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, k = k)
+        elif "floor" in self.params.extend_method:
+            freqs_cos, freqs_sin = floor_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, k = k)
         elif "radix" in self.params.extend_method:
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = 10000.0 * k)
         elif "ntk" in self.params.extend_method:
@@ -626,8 +718,10 @@ class Transformer(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.output(h[:, -self.params.max_seq_len:, :])
-            targets = targets[:, -self.params.max_seq_len:]
+            # logits = self.output(h[:, -self.params.max_seq_len:, :])
+            # targets = targets[:, -self.params.max_seq_len:]
+            logits = self.output(h[:, -256:, :])
+            targets = targets[:, -256:]
             if eval_last:
                 logits = logits[:, [-1], :]
                 targets = targets[:, [-1]]

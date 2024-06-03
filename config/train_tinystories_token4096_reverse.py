@@ -4,6 +4,7 @@
 from datetime import datetime
 
 # data
+task_name = "tinystories_reverse"
 batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
 vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 # vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
@@ -13,9 +14,9 @@ max_seq_len = 256
 init_from = "scratch"
 
 # memory
-attention_type = "attention"
-# attention_type = "memory_attention"
-extend_method = "logn_train"
+# attention_type = "attention"
+attention_type = "memory_attention"
+extend_method = ""
 key_norm = False
 
 memseqlen = 64 // 2
@@ -23,7 +24,8 @@ do_wm = False
 do_memory_ffn = True
 memory_norm = True
 reuse_kv = True
-train_orimem = True
+train_orimem = False
+update_memory = True
 
 # adamw optimizer
 gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_accumulation_steps * batch_size * max_seq_len ~= 100k
@@ -31,7 +33,7 @@ gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_acc
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 test_model = False
 # I/O
-exp_name = f"bos_{vocab_source}{vocab_size}_len{max_seq_len}"
+exp_name = f"retry_reverse_{vocab_source}{vocab_size}_len{max_seq_len}"
 if attention_type == "memory_attention":
     exp_name += f'_memory{memseqlen}'
     if do_wm:
@@ -44,12 +46,15 @@ if attention_type == "memory_attention":
         exp_name += '_reusekv'
     if train_orimem:
         exp_name += '_trainmem'
+    if update_memory:
+        exp_name += '_updatemem'
 if extend_method:
     exp_name += f'_{extend_method}'
 if key_norm:
     exp_name += '_keynorm'
 
 out_dir = f"out/{exp_name}"
+print("out dir:", out_dir)
 # wandb logging
 wandb_log = True  # disabled by default
 wandb_project = "llamac"

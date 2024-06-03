@@ -159,6 +159,7 @@ if master_process:
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
 torch.manual_seed(1337 + seed_offset)
+torch.autograd.set_detect_anomaly(True)
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
 device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
@@ -184,6 +185,16 @@ task_args = dict(
 )
 if task_name == 'tinystories':
     from tinystories import Task
+elif task_name == 'tinystories_infinity':
+    from tinystories_infinity import Task
+elif task_name == 'tinystories_order':
+    from tinystories_order import Task
+elif task_name == 'tinystories_repeat':
+    from tinystories_repeat import Task
+elif task_name == 'tinystories_reverse':
+    from tinystories_reverse import Task
+elif task_name == 'tinystories_reverse_infinity':
+    from tinystories_reverse_infinity import Task
 elif task_name == 'ultrachat':
     from ultrachat import Task
 elif task_name == 'wikipedia_en':
@@ -310,7 +321,7 @@ if ddp:
 def estimate_loss():
     out = {"train_loss": 0.0, "val_loss": 0.0, "train_acc": 0.0, "val_acc": 0.0}
     model.eval()
-    splits = ["val"] if eval_only else ["train", "val"]
+    splits = ["test"] if eval_only else ["train", "val"]
     for split in splits:
         batch_iter = iter_batches(split=split)
         losses = torch.zeros(eval_iters)  # keep on CPU
@@ -385,6 +396,9 @@ while True:
             f" train loss {losses['train_loss']:.4f}, val loss {losses['val_loss']:.4f}"
             f" train acc {losses['train_acc']:.4f}, val acc {losses['val_acc']:.4f}"
         )
+        if eval_only:
+            print(
+                f" test acc {losses['test_acc']:.4f}, test loss {losses['test_loss']:.4f}"              )
         if wandb_log:
             try:
                 wandb.log(
