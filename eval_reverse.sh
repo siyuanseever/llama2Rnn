@@ -13,7 +13,7 @@ repeat_tokens=False
 
 # model
 attention_type="attention"
-extend_method="selfExtend_logn"
+extend_method="selfExtend"
 key_norm=False
 
 
@@ -26,7 +26,7 @@ mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh
 
 
-for ((i=8; i<=10; i++))
+for ((i=8; i<=11; i++))
 do
     if [ $i -ge 14 ]; then
         batch_size=8

@@ -33,8 +33,10 @@ for name in [
 
     # "infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv_updatemem*"
 ]:
-    pattern = re.compile(r".*(selfExtend).*\.txt")
-    #pattern = re.compile(r".*(selfExtend|ReRoPE).*\.txt")
+    # pattern = re.compile(r".*(ReRoPE).*\.txt")
+    pattern = re.compile(r".*(log_selfExtend).*\.txt")
+    # pattern = re.compile(r".*(SWA).*\.txt")
+    # pattern = re.compile(r".*(selfExtend|ReRoPE).*\.txt")
     files = glob.glob(f"./out/{name}/*.txt")
     matching_files = [file for file in files if pattern.search(file)]
 

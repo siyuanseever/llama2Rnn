@@ -14,9 +14,9 @@ max_seq_len = 256
 init_from = "scratch"
 
 # memory
-# attention_type = "attention"
-attention_type = "memory_attention"
-extend_method = ""
+attention_type = "attention"
+# attention_type = "memory_attention"
+extend_method = "xpos"
 key_norm = False
 
 memseqlen = 64 // 2
