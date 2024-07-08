@@ -26,21 +26,43 @@ for name in [
     # "retry_repeat_custom4096_len256_nope",
     # "retry2_repeat_custom4096_len256_memory32_ffn_norm_reusekv_trainmem",
 
-    "retry_reverse_custom4096_len256",
+    # "retry_reverse_custom4096_len256_theta",
+    # "retry_reverse_custom4096_len256_theta100000",
+    # "retry_reverse_custom4096_len256_theta1000000",
+    # "retry_reverse_custom4096_len256_xpos",
+    # "retry_reverse_custom4096_len256_xpos128",
+    # "retry_reverse_custom4096_len256_xpos1024",
+
+    # "retry_reverse_custom4096_len1024",
+    # "retry5_reverse_custom4096_len1024",
+    # "retry5_reverse_custom4096_len1024_xpos1024",
+    # "retry5_reverse_custom4096_len1024_xpos128",
+    # "retry5_reverse_custom4096_len1024_xpos32",
+
+    # "retry_reverse_custom4096_len256",
     # "retry_reverse_custom4096_len256_nope",
     # "retry_reverse_custom4096_len256_memory32_ffn_norm_reusekv_trainmem",
-    # "retry_reverse_custom4096_len1024",
 
-    # "infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv_updatemem*"
+    # "retry_reverse_custom4096_len256_freqsAbs",
+    # "retry_reverse_custom4096_len256_sumCis",
+    # "retry_reverse_custom4096_len256_sumCis_freqsAbs",
+
+    "infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv",
+    "infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv_updatemem",
+    "retry_reverse_custom4096_len256_memory32_ffn_norm_reusekv_updatemem",
+
+    # "infinity_repeat_custom4096_len1024_memory64_ffn_norm_reusekv_updatemem*",
+    # "infinity_reverse_custom4096_len1024_memory64_ffn_norm_reusekv_updatemem*",
 ]:
     # pattern = re.compile(r".*(ReRoPE).*\.txt")
-    pattern = re.compile(r".*(log_selfExtend).*\.txt")
+    # pattern = re.compile(r".*(log_selfExtend).*\.txt")
     # pattern = re.compile(r".*(SWA).*\.txt")
     # pattern = re.compile(r".*(selfExtend|ReRoPE).*\.txt")
+    pattern = re.compile(r".*\.txt")
     files = glob.glob(f"./out/{name}/*.txt")
     matching_files = [file for file in files if pattern.search(file)]
 
 
-    print(name)
+    print("="*30, name)
     for file in matching_files:
         parse(file)

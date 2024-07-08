@@ -17,7 +17,6 @@ class ModelArgs:
     extend_method: str = "extrapolation"
     dropout: float = 0.0
     attention_type: str = "attention"
-    memory_attention: bool = False
     memseqlen: int = 128
     do_wm: bool = False
     do_memory_ffn: bool = False
@@ -28,3 +27,4 @@ class ModelArgs:
     update_memory: bool = False
     use_saved_mem: bool = False
     key_norm: bool = False
+    theta : int = 10000

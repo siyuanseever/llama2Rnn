@@ -3,7 +3,7 @@
 
 from datetime import datetime
 
-max_iters = 1000000  # total number of training iterations
+max_iters = 100000  # total number of training iterations
 lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
 
 # data
@@ -13,16 +13,15 @@ vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom
 # vocab_source = "custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
 vocab_size = 4096 # the Llama 2 tokenizer has 32K tokens
 
-max_seq_len = 256
-init_from = "resume"
+max_seq_len = 1024
+init_from = "scratch"
 
 # memory
-attention_type = "attention"
 attention_type = "memory_attention"
 extend_method = ""
 key_norm = False
 
-memseqlen = 64 // 2
+memseqlen = 64
 do_wm = False
 do_memory_ffn = True
 memory_norm = True
@@ -36,7 +35,7 @@ gradient_accumulation_steps = 131072 // max_seq_len // batch_size # gradient_acc
 dtype = "float32"  # float32|bfloat16|float16 2080Ti does not support bfloat16
 test_model = False
 # I/O
-exp_name = f"infinity_repeat_{vocab_source}{vocab_size}_len{max_seq_len}"
+exp_name = f"retry6_infinity_reverse_{vocab_source}{vocab_size}_len{max_seq_len}"
 if attention_type == "memory_attention":
     exp_name += f'_memory{memseqlen}'
     if do_wm:

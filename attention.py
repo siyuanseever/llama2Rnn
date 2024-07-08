@@ -8,6 +8,7 @@ from layers import RMSNorm, FeedForward, l2norm
 import attention_extend
 from attention_extend import apply_logn
 from position_embedding import apply_rotary_emb, apply_rotary_emb_window, apply_rotary_emb_group, repeat_kv
+from position_embedding import apply_sum_cis_emb
 
 
 class Attention(nn.Module):
@@ -70,12 +71,14 @@ class Attention(nn.Module):
         self.register_buffer("mask_inf", attention_extend.trans_mask_to_mask_inf(mask))
 
         if "ReRoPE" in args.extend_method:
-            self.window = args.max_seq_len
+            self.window = min(args.max_seq_len, args.extend_seq_len)
             rectified_mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-self.window)
             self.register_buffer("rectified_mask", rectified_mask)
             print(f"window: {self.window}")
         elif "selfExtend" in args.extend_method:
-            self.window = args.max_seq_len - 1
+            self.window = min(args.max_seq_len - 1, args.extend_seq_len - 1)
+            if "selfExtendHalf" in args.extend_method:
+                self.window = (args.max_seq_len+1) // 2
             if 'layer5group' in self.args.extend_method and self.layer_id == 5:
                 self.window = (args.max_seq_len+1) // 2
             elif 'layer4group' in self.args.extend_method and self.layer_id == 4:
@@ -105,6 +108,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
+        real: torch.Tensor,
     ):
         bsz, seqlen, _ = x.shape
 
@@ -133,8 +137,10 @@ class Attention(nn.Module):
             pass
         elif 'layer0adapt' in self.args.extend_method and self.layer_id == 0:
             pass
+        elif 'sumCis' in self.args.extend_method:
+            xq, xk = apply_sum_cis_emb(xq, xk, freqs_cos, freqs_sin, real)
         else:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin, real)
         logn = True if 'logn' in self.args.extend_method else False
         eval_only = False if 'train' in self.args.extend_method else True
         xq = apply_logn(xq, self.args.max_seq_len, eval_only) if logn else xq
@@ -151,7 +157,7 @@ class Attention(nn.Module):
 
         if 'ReRoPE' in self.args.extend_method:
             xq2 = apply_rotary_emb_window(
-                xq_tmp, freqs_cos, freqs_sin,
+                xq_tmp, freqs_cos, freqs_sin, real,
                 window=self.window
             )
             xq2 = apply_logn(xq2, self.args.max_seq_len, eval_only) if logn else xq2
@@ -170,7 +176,7 @@ class Attention(nn.Module):
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
         elif 'selfExtend' in self.args.extend_method:
             xq2, xk2 = apply_rotary_emb_group(
-                xq_tmp, xk_tmp, freqs_cos, freqs_sin,
+                xq_tmp, xk_tmp, freqs_cos, freqs_sin, real,
                 window=self.window, group=self.group
             )
             xq2 = apply_logn(xq2, self.args.max_seq_len, eval_only) if logn else xq2
@@ -189,8 +195,7 @@ class Attention(nn.Module):
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
         else:
             # flash implementation
-            # if self.flash:
-            if False:
+            if self.flash:
                 output = torch.nn.functional.scaled_dot_product_attention(
                     xq, xk, xv, 
                     attn_mask=self.mask[:, :, :seqlen, :seqlen], 
@@ -277,6 +282,7 @@ class MemoryAttention(nn.Module):
         x: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
+        real: torch.Tensor,
     ):
         bsz, seqlen, _ = x.shape
 
@@ -286,7 +292,7 @@ class MemoryAttention(nn.Module):
             if mbsz == 1:
                 om = self.memory.expand(bsz, self.memseqlen, self.dim)
             else:
-                om = self.memory.clone().detach()
+                om = (self.memory[:bsz]).clone().detach()
         else:
             om = self.origin_mem.expand(bsz, self.memseqlen, self.dim)
         for idx in range(0, seqlen, self.memseqlen):
@@ -315,7 +321,10 @@ class MemoryAttention(nn.Module):
             xv = torch.concat([mv, xv], dim=1)
 
             # RoPE relative positional embeddings
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cos[:self.memseqlen+subseqlen], freqs_sin[:self.memseqlen+subseqlen])
+            xq, xk = apply_rotary_emb(xq, xk, 
+                freqs_cos[:self.memseqlen+subseqlen], freqs_sin[:self.memseqlen+subseqlen],
+                real[:self.memseqlen+subseqlen],
+            )
             logn = True if 'logn' in self.args.extend_method else False
             eval_only = False if 'train' in self.args.extend_method else True
             xq = apply_logn(xq, self.args.max_seq_len, eval_only) if logn else xq
@@ -340,7 +349,7 @@ class MemoryAttention(nn.Module):
             if 'emamem' in self.args.extend_method:
                 self.memory = self.memory * 0.6 + om.clone().detach() * 0.4
             else:
-                self.memory = om.clone().detach()
+                self.memory[:bsz] = om.clone().detach()
 
         output = torch.concat(outputs, dim=1)
         # final projection into the residual stream

@@ -13,7 +13,7 @@ repeat_tokens=False
 
 # model
 attention_type="memory_attention"
-extend_method="emamem"
+extend_method=""
 key_norm=False
 memseqlen=32
 do_wm=False
@@ -31,28 +31,29 @@ if [ "$save_memory" ]; then
 fi
 
 # I/O
-out_dir=./out/infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv_updatemem_emamem
+# out_dir=./out/infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv_updatemem
+out_dir=./out/infinity_reverse_custom4096_len1024_memory64_ffn_norm_reusekv_updatemem
+out_dir=./out/infinity_repeat_custom4096_len256_memory32_ffn_norm_reusekv
+# out_dir=./out/infinity_reverse_custom4096_len1024_memory64_ffn_norm_reusekv_updatemem_memlayer5
 
 mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh
+log_file="${out_dir}/log_${use_saved_mem}_update${update_memory}_${extend_method}_${key_norm}.txt"
 
-
-for ((i=8; i<=12; i++))
+for ((i=8; i<=16; i++))
 do
-    if [ $i -ge 14 ]; then
-        batch_size=8
-    fi
-    if [ $i -ge 17 ]; then
-        batch_size=1
-        eval_iters=100
-    fi
+    # if [ $i -ge 17 ]; then
+    #     batch_size=1
+    #     eval_iters=100
+    # fi
     max_seq_len=$((2 ** i))
     # max_seq_len=$((32 * i))
-    echo "eval $max_seq_len"
+    echo "eval $max_seq_len at ${log_file}"
     date
     python3 train.py \
         --task_name=${task_name} \
         --batch_size=${batch_size} --max_seq_len=${max_seq_len} \
+        --extend_method=${extend_method} \
         --key_norm=${key_norm} \
         --vocab_source=${vocab_source} --vocab_size=${vocab_size} \
         --attention_type=${attention_type} --memseqlen=${memseqlen} \
@@ -65,5 +66,5 @@ do
         --repeat_tokens=${repeat_tokens} \
         --save_memory=${save_memory} --use_saved_mem=${use_saved_mem} --update_memory=${update_memory}\
         --out_dir=${out_dir} \
-        | tee -a ${out_dir}/log_${use_saved_mem}_update${update_memory}_${extend_method}_${key_norm}.txt
+        | tee -a ${log_file}
 done

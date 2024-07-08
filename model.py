@@ -10,6 +10,7 @@ from attention import MemoryAttention, Attention, ChunkLSTM
 from modelargs import ModelArgs
 from layers import RMSNorm, FeedForward
 from position_embedding import repeat_freqs, precompute_freqs_cis, ntk_freqs_cis, repeat_freqs_clip
+from position_embedding import get_xpos_param, get_default_real, get_xpos_real
 
 
 class TransformerBlock(nn.Module):
@@ -18,8 +19,15 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        if args.attention_type == "memory_attention" or args.memory_attention:
-            self.attention = MemoryAttention(args)
+        if args.attention_type == "memory_attention":
+            if "memlayer" in args.extend_method:
+                if f"memlayer{layer_id}" in args.extend_method:
+                    print(f"memory_attention at layer {layer_id}")
+                    self.attention = MemoryAttention(args)
+                else:
+                    self.attention = Attention(layer_id, args)
+            else:
+                self.attention = MemoryAttention(args)
         elif args.attention_type == "LSTM":
             self.attention = ChunkLSTM(args)
         else:
@@ -34,8 +42,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x, freqs_cos, freqs_sin):
-        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+    def forward(self, x, freqs_cos, freqs_sin, real):
+        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, real)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -62,29 +70,40 @@ class Transformer(nn.Module):
 
         # some useful precompute for the RoPE relative positional embeddings
         k = self.params.extend_seq_len / self.params.max_seq_len
+        # xpos
+        if "xpos" in self.params.extend_method:
+            lam = get_xpos_param(self.params.extend_method)
+            real = get_xpos_real(self.params.dim // self.params.n_heads, self.params.extend_seq_len, lam=lam)
+        else:
+            real = get_default_real(self.params.dim // self.params.n_heads, self.params.extend_seq_len)
         # various sequence length extrapolation
         if "extrapolation" in self.params.extend_method:
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta)
         elif "interpolation" in self.params.extend_method:
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, k = k)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta, k = k)
         elif "radix" in self.params.extend_method:
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = 10000.0 * k)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta * k)
         elif "ntk" in self.params.extend_method:
-            freqs_cos, freqs_sin = ntk_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, k=k)
+            freqs_cos, freqs_sin = ntk_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta, k=k)
         elif self.params.extend_method == "rotate":
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len, theta = self.params.theta)
             if k > 1:
                 freqs_cos = repeat_freqs(freqs_cos, int(k))
                 freqs_sin = repeat_freqs(freqs_sin, int(k))
         elif "PEClip" in self.params.extend_method:
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len, theta = self.params.theta)
             if k > 1:
                 freqs_cos = repeat_freqs_clip(freqs_cos, int(k))
                 freqs_sin = repeat_freqs_clip(freqs_sin, int(k))
         else:
-            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len)
+            freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta)
+        if "freqsAbs" in self.params.extend_method:
+            freqs_cos = torch.abs(freqs_cos)
+            freqs_sin = torch.abs(freqs_sin)
+            print("use abs freqs")
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        self.register_buffer("real", real, persistent=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -113,13 +132,13 @@ class Transformer(nn.Module):
         return repeated_tokens
 
     def forward(self, 
-        tokens: torch.Tensor, targets: Optional[torch.Tensor] = None, 
-        eval_last: bool = False, repeat_tokens: bool = False,
+        tokens: torch.Tensor, targets: Optional[torch.Tensor] = None,
+        eval_only: bool = False, eval_last: bool = False, repeat_tokens: bool = False,
     ) -> torch.Tensor:
         if self.params.extend_method == "clip":
             tokens = tokens[:, -self.params.max_seq_len:]
             targets = targets[:, -self.params.max_seq_len:]
-        if repeat_tokens:
+        if eval_only and repeat_tokens:
             tokens = self._repeat_tokens(tokens)
             targets = self._repeat_tokens(targets)
 
@@ -128,20 +147,21 @@ class Transformer(nn.Module):
         h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
+        real = self.real[:seqlen]
 
         for layer in self.layers:
-            h = layer(h, freqs_cos, freqs_sin)
+            h = layer(h, freqs_cos, freqs_sin, real)
         h = self.norm(h)
+        logits = self.output(h)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            # logits = self.output(h[:, -self.params.max_seq_len:, :])
-            # targets = targets[:, -self.params.max_seq_len:]
-            logits = self.output(h[:, -256:, :])
-            targets = targets[:, -256:]
-            if eval_last:
-                logits = logits[:, [-1], :]
-                targets = targets[:, [-1]]
+            if eval_only:
+                logits = logits[:, -256:, :]
+                targets = targets[:, -256:]
+                if eval_last:
+                    logits = logits[:, [-1], :]
+                    targets = targets[:, [-1]]
             self.last_loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)), 
                 targets.reshape(-1),

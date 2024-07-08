@@ -61,6 +61,7 @@ multiple_of = 32
 dropout = 0.0
 # extrapolation
 key_norm = False
+theta = 10000
 # memory
 attention_type = "attention"
 memseqlen = 128
@@ -125,6 +126,7 @@ model_args = dict(
     update_memory=update_memory,
     use_saved_mem=bool(use_saved_mem),
     key_norm=key_norm,
+    theta=theta,
 )  # start with model_args from command line
 
 # validating checks
@@ -329,7 +331,7 @@ def estimate_loss():
         for k in tqdm(range(eval_iters)):
             X, Y = next(batch_iter)
             with ctx:
-                _ = model(X, Y, eval_last=eval_last, repeat_tokens=repeat_tokens)
+                _ = model(X, Y, eval_only=eval_only, eval_last=eval_last, repeat_tokens=repeat_tokens)
                 loss = raw_model.last_loss
                 acc = raw_model.last_acc
 
