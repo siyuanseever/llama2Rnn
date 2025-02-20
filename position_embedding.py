@@ -10,6 +10,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0):
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
 
+def ntk_rope_freqs_cis(dim: int, end: int, theta: float = 10000.0, k = 1.0):
+    theta = theta * k ** (dim / (dim - 2))
+    return precompute_freqs_cis(dim, end, theta)
+
 def get_default_real(dim: int, end: int):
     t = torch.arange(end).float()
     i = torch.arange(dim / 2)

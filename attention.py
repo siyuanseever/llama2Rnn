@@ -21,9 +21,14 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
-        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        if 'ConcatPE' in args.extend_method:
+            self.wq = nn.Linear(args.dim + self.head_dim, args.n_heads * self.head_dim, bias=False)
+            self.wk = nn.Linear(args.dim + self.head_dim, self.n_kv_heads * self.head_dim, bias=False)
+            self.wv = nn.Linear(args.dim + self.head_dim, self.n_kv_heads * self.head_dim, bias=False)
+        else:
+            self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+            self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+            self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
@@ -38,35 +43,35 @@ class Attention(nn.Module):
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
         mask0 = torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=0)
         if "SWA" in args.extend_method or "BCA" in args.extend_method:
-            self.window = args.max_seq_len
-            if "SWAlayer04" in args.extend_method and layer_id == 5:
-                self.window = args.extend_seq_len
-            elif "SWAlayer15" in args.extend_method and layer_id == 0:
-                self.window = args.extend_seq_len
-            elif "SWAlayer03" in args.extend_method and layer_id in [4, 5]:
-                self.window = args.extend_seq_len
-            elif "SWAlayer02" in args.extend_method and layer_id in [3, 4, 5]:
-                self.window = args.extend_seq_len
-            elif "SWAlayer01" in args.extend_method and layer_id in [2, 3, 4, 5]:
-                self.window = args.extend_seq_len
-            elif "SWAlayer00" in args.extend_method and layer_id in [1, 2, 3, 4, 5]:
-                self.window = args.extend_seq_len
-            elif "NAlayer5" in args.extend_method and layer_id == 5:
-                self.window = 1
-            elif "NAlayer4" in args.extend_method and layer_id == 4:
-                self.window = 1
-            elif "NAlayer3" in args.extend_method and layer_id == 3:
-                self.window = 1
-            elif "NAlayer2" in args.extend_method and layer_id == 2:
-                self.window = 1
-            elif "NAlayer1" in args.extend_method and layer_id == 1:
-                self.window = 1
-            elif "NAlayer0" in args.extend_method and layer_id == 0:
-                self.window = 1
-            mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-self.window)
-            print(f"window: {self.window}, layer_id: {layer_id}")
+            window = args.max_seq_len
+            mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-window)
+            if "SWAHalf" in args.extend_method or "SWAQuater" in args.extend_method:
+                if "SWAHalf" in args.extend_method:
+                    w_size = args.max_seq_len // 2
+                else:
+                    w_size = args.max_seq_len // 4
+                print(f"w_size = {w_size}")
+                end_mask = torch.zeros_like(mask, dtype=torch.bool)
+                end_mask[:, :, -w_size:, :] = True
+                end_mask &= torch.ones_like(mask, dtype=bool).tril(diagonal=-window)
+                mask |= end_mask
+        elif "AMask" in args.extend_method:
+            delta = 512
+            window = args.max_seq_len - delta
+            # assert delta <= window, (delta, window)
+            mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-window)
+            mask[:, :, window:, :delta] = True
+        elif "ADoubleWindow" in args.extend_method:
+            delta = 256
+            window = min(args.max_seq_len*2 - delta, args.extend_seq_len)
+            assert delta <= window, (delta, window)
+            mask = mask0 ^ torch.ones(1, 1, args.extend_seq_len, args.extend_seq_len, dtype=torch.bool).tril(diagonal=-window)
+            mask[:, :, window:, :delta] = True
         else:
             mask = mask0
+        print("mask")
+        print(mask.sum(dim=-1)[:, :, :10], mask.sum(dim=-1)[:, :, -10:])
+        print(mask.sum(dim=-2)[:, :, :10], mask.sum(dim=-2)[:, :, -10:])
         self.register_buffer("mask", mask)
         self.register_buffer("mask_inf", attention_extend.trans_mask_to_mask_inf(mask))
 
@@ -79,21 +84,11 @@ class Attention(nn.Module):
             self.window = min(args.max_seq_len - 1, args.extend_seq_len - 1)
             if "selfExtendHalf" in args.extend_method:
                 self.window = (args.max_seq_len+1) // 2
+            elif "selfExtendQuater" in args.extend_method:
+                self.window = (args.max_seq_len+1) // 4
             if 'layer5group' in self.args.extend_method and self.layer_id == 5:
                 self.window = (args.max_seq_len+1) // 2
-            elif 'layer4group' in self.args.extend_method and self.layer_id == 4:
-                self.window = (args.max_seq_len+1) // 2
-            elif 'layer3group' in self.args.extend_method and self.layer_id == 3:
-                self.window = (args.max_seq_len+1) // 2
-            elif 'layer1group' in self.args.extend_method and self.layer_id == 1:
-                self.window = (args.max_seq_len+1) // 2
-            elif 'layer0group' in self.args.extend_method and self.layer_id == 0:
-                self.window = (args.max_seq_len+1) // 2
             elif 'layer5allgroup' in self.args.extend_method and self.layer_id == 5:
-                self.window = 0
-            elif 'layer3allgroup' in self.args.extend_method and self.layer_id == 3:
-                self.window = 0
-            elif 'layer0allgroup' in self.args.extend_method and self.layer_id == 0:
                 self.window = 0
             left_size = args.max_seq_len - self.window
             self.group = (args.extend_seq_len - self.window + left_size -1) // left_size
@@ -110,7 +105,12 @@ class Attention(nn.Module):
         freqs_sin: torch.Tensor,
         real: torch.Tensor,
     ):
-        bsz, seqlen, _ = x.shape
+        bsz, seqlen, ndim = x.shape
+        freqs_cos, freqs_sin, real = freqs_cos[:seqlen], freqs_sin[:seqlen], real[:seqlen],
+        if 'ConcatPE' in self.args.extend_method:
+            freqs_cos = freqs_cos[None, :, :].expand(bsz, seqlen, self.head_dim//2)
+            freqs_sin = freqs_sin[None, :, :].expand(bsz, seqlen, self.head_dim//2)
+            x = torch.concat([x, freqs_cos, freqs_sin], dim=2)
 
         # QKV
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -123,7 +123,7 @@ class Attention(nn.Module):
             xk_tmp = xk
 
         # RoPE relative positional embeddings
-        if 'nope' in self.args.extend_method:
+        if 'nope' in self.args.extend_method or 'ConcatPE' in self.args.extend_method:
             pass
         elif 'layeradapt' in self.args.extend_method and self.layer_id == 5:
             pass

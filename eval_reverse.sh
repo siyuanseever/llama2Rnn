@@ -6,19 +6,25 @@ vocab_source="custom" # llama2|custom; use Lllama 2 vocab from Meta, or custom t
 vocab_size=4096 # the Llama 2 tokenizer has 32K tokens
 
 # eval
-batch_size=32  # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size=4  # if gradient_accumulation_steps > 1, this is the micro-batch size
 eval_iters=1000
 eval_last=False
 repeat_tokens=False
 
 # model
 attention_type="attention"
-attention_type="memory_attention"
-# extend_methods=("ReRoPE" "selfExtendHalf")
+# attention_type="memory_attention"
+# extend_methods=("ReRoPE" "selfExtendHalf" "interpolation")
+# extend_methods=("AMask")
+# extend_methods=("ADoubleWindow")
+# extend_methods=""
+extend_methods=("NTK-RoPE")
+# extend_methods=("SWAHalf_selfExtendHalf" "SWAQuater_selfExtendHalf")
+# extend_methods=("SWAHalf_selfExtendQuater" "SWAQuater_selfExtendQuater")
 # extend_methods=("extrapolation" "interpolation" "SWA" "selfExtendHalf" "ReRoPE")
 # extend_methods=("extrapolation" "interpolation" "SWA")
+# extend_methods=("ntk" "radix" "PEClip" "clip")
 # extend_methods=("extrapolation" "SWA")
-extend_methods=""
 theta=10000
 
 key_norm=False
@@ -48,24 +54,25 @@ fi
 #
 # out_dir=./out/retry_reverse_custom4096_len1024
 # out_dir=./out/retry5_reverse_custom4096_len1024
+out_dir=./out/retry5_reverse_custom4096_len1024_ConcatPE
 # out_dir=./out/retry5_reverse_custom4096_len1024_xpos32
 #
-out_dir=./out/retry_reverse_custom4096_len256_memory32_ffn_norm_reusekv_updatemem
+# out_dir=./out/retry_reverse_custom4096_len256_memory32_ffn_norm_reusekv_updatemem
 
 mkdir -p ${out_dir}
 cp $0 ${out_dir}/eval.sh
-log_file="${out_dir}/log_${use_saved_mem}_update${update_memory}_${extend_method}_${key_norm}.txt"
 
 for extend_method in "${extend_methods[@]}"; do
-    # extend_method="xpos32_${extend_method}"
-    for ((i=8; i<=12; i++))
+    extend_method="ConcatPE_${extend_method}"
+    log_file="${out_dir}/log2_${use_saved_mem}_update${update_memory}_${extend_method}_${key_norm}.txt"
+    for ((i=8; i<=13; i++))
     do
         # if [ $i -ge 17 ]; then
         #     batch_size=1
         #     eval_iters=100
         # fi
         max_seq_len=$((2 ** i))
-        echo "eval $max_seq_len at $out_dir"
+        echo "================== eval $max_seq_len at $log_file ================"
         date
         python3 train.py \
             --task_name=${task_name} \

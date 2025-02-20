@@ -16,7 +16,7 @@ init_from = "scratch"
 # memory
 attention_type = "attention"
 # attention_type = "memory_attention"
-extend_method = "xpos32"
+extend_method = "ConcatPE"
 key_norm = False
 
 memseqlen = 64 // 2

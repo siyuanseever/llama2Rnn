@@ -10,6 +10,7 @@ from attention import MemoryAttention, Attention, ChunkLSTM
 from modelargs import ModelArgs
 from layers import RMSNorm, FeedForward
 from position_embedding import repeat_freqs, precompute_freqs_cis, ntk_freqs_cis, repeat_freqs_clip
+from position_embedding import ntk_rope_freqs_cis
 from position_embedding import get_xpos_param, get_default_real, get_xpos_real
 
 
@@ -81,6 +82,8 @@ class Transformer(nn.Module):
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta)
         elif "interpolation" in self.params.extend_method:
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta, k = k)
+        elif "NTK-RoPE" in self.params.extend_method:
+            freqs_cos, freqs_sin = ntk_rope_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta, k = k)
         elif "radix" in self.params.extend_method:
             freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.extend_seq_len, theta = self.params.theta * k)
         elif "ntk" in self.params.extend_method:
@@ -145,9 +148,9 @@ class Transformer(nn.Module):
         bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
-        freqs_cos = self.freqs_cos[:seqlen]
-        freqs_sin = self.freqs_sin[:seqlen]
-        real = self.real[:seqlen]
+        freqs_cos = self.freqs_cos[:]
+        freqs_sin = self.freqs_sin[:]
+        real = self.real[:]
 
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin, real)
